@@ -738,3 +738,8 @@ speed-patch-description = Scala le velocità di scorrimento e rotazione di skin 
 speed-patch-multiplier = Velocità
 speed-patch-roundtrip-mismatch = Discrepanza nel ciclo completo della patch di velocità
 app-speed-patch = Velocità animazione
+
+overlay-perf-tip-title = Prestazioni dell'overlay
+overlay-perf-tip-slow = Se gli overlay dei plugin sembrano lenti, aumenta la frequenza di aggiornamento dell'overlay in Impostazioni > Sistema.
+overlay-perf-tip-choppy = Se Rocket League scatta mentre Hebnix è aperto, abbassala invece.
+overlay-perf-tip-open-settings = Apri impostazioni

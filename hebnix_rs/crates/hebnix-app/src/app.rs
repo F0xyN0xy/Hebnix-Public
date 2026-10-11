@@ -4261,6 +4261,7 @@ impl HebnixApp {
     }
 
     fn render_plugins_tab(&mut self, ui: &mut egui::Ui) {
+        self.render_overlay_perf_tip(ui.ctx());
         ui.horizontal(|ui| {
             if ui.button(t("action-open-plugins-folder")).clicked() {
                 let _ = open::that(&self.plugin_dir);
@@ -6227,6 +6228,47 @@ impl HebnixApp {
         if close {
             self.fullscreen_notice = false;
             self.fullscreen_notice_dismissed = true;
+        }
+    }
+
+    /// shown the first time the Plugins tab opens: the overlay refresh rate
+    /// trades overlay smoothness against how smooth the game itself runs
+    fn render_overlay_perf_tip(&mut self, ctx: &egui::Context) {
+        if self.config.settings.overlay_perf_tip_seen {
+            return;
+        }
+        let mut dismiss = false;
+        let mut open_settings = false;
+
+        egui::Window::new(t("overlay-perf-tip-title"))
+            .id(egui::Id::new("overlay-perf-tip"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(t("overlay-perf-tip-slow"));
+                ui.add_space(4.0);
+                ui.label(t("overlay-perf-tip-choppy"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t("overlay-perf-tip-open-settings")).clicked() {
+                        open_settings = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t("btn-ok")).clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+
+        if open_settings {
+            self.tab = Tab::Settings;
+            self.hebnix_settings_tab = HebnixSettingsTab::System;
+        }
+        if dismiss || open_settings {
+            self.config.settings.overlay_perf_tip_seen = true;
+            self.save_config();
         }
     }
 
