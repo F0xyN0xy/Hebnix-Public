@@ -770,3 +770,8 @@ speed-patch-nothing = { $file } hat keine animierten Parameter zum Skalieren.
 speed-patch-done = { $file }: { $count } Animationswerte auf { $speed }x skaliert
 speed-patch-no-backup = Kein Backup für { $file } gefunden
 speed-patch-restored = { $file } wiederhergestellt
+
+overlay-perf-tip-title = Overlay-Leistung
+overlay-perf-tip-slow = Wenn Plugin-Overlays langsam oder ruckelig wirken, erhöhe die Overlay-Aktualisierungsrate unter Einstellungen > System.
+overlay-perf-tip-choppy = Wenn Rocket League ruckelt oder stottert, während Hebnix offen ist, verringere sie stattdessen.
+overlay-perf-tip-open-settings = Einstellungen öffnen

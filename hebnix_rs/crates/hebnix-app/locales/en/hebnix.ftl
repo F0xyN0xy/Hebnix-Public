@@ -911,3 +911,8 @@ toast-filter-all = All plugins
 toast-sent-at = Sent at { $time }
 toast-clear = Clear all
 toast-empty = Nothing here yet. Plugins show up here when they send a toast.
+
+overlay-perf-tip-title = Overlay performance
+overlay-perf-tip-slow = If plugin overlays feel slow or laggy, raise the overlay refresh rate in Settings > System.
+overlay-perf-tip-choppy = If Rocket League feels choppy or stuttery while Hebnix is open, lower it instead.
+overlay-perf-tip-open-settings = Open Settings
