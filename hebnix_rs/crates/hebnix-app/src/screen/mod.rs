@@ -136,14 +136,6 @@ pub struct Service {
 
 static SERVICE: OnceLock<Service> = OnceLock::new();
 
-/// true while a plugin is actively reading pixels, so the app can tick and
-/// repaint faster to keep the overlay in step with what's on screen
-pub fn is_active() -> bool {
-    SERVICE.get().is_some_and(|s| {
-        s.worker_running.load(Ordering::Relaxed) && s.idle_for() < Duration::from_secs(1)
-    })
-}
-
 /// call once at startup with the app's message sender
 pub fn init(tx: Sender<AppMsg>) {
     let _ = SERVICE.set(Service {

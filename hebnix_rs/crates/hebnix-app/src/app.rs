@@ -5500,7 +5500,7 @@ impl HebnixApp {
                                             .suffix(" fps"),
                                         )
                                         .on_hover_text(
-                                            "How often the overlay and plugins update while a plugin is reading the screen (like PfpOverlayV2's menu detection). Lower it to use less CPU on slower PCs, higher is more responsive.",
+                                            "How often the overlay and plugins update while Rocket League is open. Lower it to use less CPU on slower PCs, higher is smoother.",
                                         );
                                     if slider.drag_stopped() || slider.lost_focus() {
                                         self.save_config();
@@ -8016,12 +8016,9 @@ impl eframe::App for HebnixApp {
             self.render_install_modal(ctx);
             self.render_rl_launch_setup(ctx);
         }
-        let screen_active = self.last_rl_open && crate::screen::is_active();
         let fast_ms = 1000 / u64::from(self.config.settings.overlay_refresh_fps.clamp(20, 60));
-        let plugin_tick_interval = if screen_active {
+        let plugin_tick_interval = if self.last_rl_open {
             Duration::from_millis(fast_ms)
-        } else if self.last_rl_open {
-            Duration::from_millis(50)
         } else {
             Duration::from_millis(500)
         };
@@ -8036,10 +8033,8 @@ impl eframe::App for HebnixApp {
                 || self.toasts.has_work());
         let heartbeat = if self.toasts.showing() {
             Duration::from_millis(16)
-        } else if screen_active {
-            Duration::from_millis(fast_ms)
         } else if fast {
-            Duration::from_millis(50)
+            Duration::from_millis(fast_ms)
         } else {
             Duration::from_millis(500)
         };
