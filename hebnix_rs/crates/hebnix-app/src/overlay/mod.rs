@@ -136,7 +136,7 @@ pub fn enforce_hidden() {
 // painted, then replayed on the page's canvas. No-ops outside a frame.
 
 /// rgba color, straight (non-premultiplied) alpha 0-255
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
 pub fn line(x1: f32, y1: f32, x2: f32, y2: f32, color: Rgba, width: f32) {
@@ -191,7 +191,7 @@ pub fn image(path: &str, x: f32, y: f32, w: f32, h: f32, opacity: f32, radius: f
 
 pub fn capture_image(
     handle: u64,
-    frame: &crate::plugins::window_capture::CapturedFrame,
+    frame: std::sync::Arc<crate::plugins::window_capture::CapturedFrame>,
     x: f32,
     y: f32,
     w: f32,

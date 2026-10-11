@@ -3809,7 +3809,7 @@ fn build_draw_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                 if let Some(frame) = capture_host.captures.frame(handle) {
                     overlay::capture_image(
                         handle,
-                        &frame,
+                        frame,
                         x,
                         y,
                         w,

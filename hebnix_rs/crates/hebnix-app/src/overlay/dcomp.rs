@@ -538,7 +538,24 @@ impl D2dCanvas {
         }
     }
 
-    pub fn image(&self, path: &str, x: f32, y: f32, w: f32, h: f32, opacity: f32, radius: f32) {
+    /// false when the picture couldn't be loaded (yet), so nothing was drawn
+    #[allow(clippy::too_many_arguments)]
+    pub fn image(
+        &self,
+        path: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        opacity: f32,
+        radius: f32,
+    ) -> bool {
+        self.draw_image(path, x, y, w, h, opacity, radius);
+        self.image_cache.borrow().contains_key(path)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_image(&self, path: &str, x: f32, y: f32, w: f32, h: f32, opacity: f32, radius: f32) {
         let mut cache = self.image_cache.borrow_mut();
         let image = if let Some(img) = cache.get(path) {
             Some(img.clone())
@@ -914,7 +931,8 @@ impl DcompOverlay {
             let _ = self.d2d_ctx.EndDraw(None, None);
             self.d2d_ctx.SetTarget(None);
             if let Some(sc) = &self.swapchain {
-                let _ = sc.Present(1, Default::default());
+                // dwm picks up the newest buffer itself, no need to block on vblank
+                let _ = sc.Present(0, Default::default());
             }
             let _ = self.dcomp_device.Commit();
 
@@ -925,6 +943,10 @@ impl DcompOverlay {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
         }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 
     pub fn hide(&mut self) {
