@@ -3146,6 +3146,26 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             })?,
         )?;
     }
+    // raw statsapi socket command, hebnix.stats_send("Name", {..})
+    {
+        let host = Rc::clone(&host);
+        hebnix.set(
+            "stats_send",
+            lua.create_function(move |lua, (command, data): (String, Option<LuaValue>)| {
+                let json_body = lua_body_to_json(lua, data);
+                let cmd = if json_body.as_object().map_or(false, |o| o.is_empty()) {
+                    hebnix_sdk::stats::websocket::WsCommand::new(command)
+                } else {
+                    hebnix_sdk::stats::websocket::WsCommand {
+                        command,
+                        data: Some(json_body),
+                    }
+                };
+                let _ = host.tx.send(AppMsg::SendWsCommand(cmd));
+                Ok(())
+            })?,
+        )?;
+    }
     {
         let host = Rc::clone(&host);
         hebnix.set(
@@ -3196,29 +3216,6 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             Ok(hex::encode(result.into_bytes()))
         })?,
     )?;
-
-    // WebSocket Send
-    {
-        let host = Rc::clone(&host);
-        hebnix.set(
-            "ws_send",
-            lua.create_function(move |lua, (command, data): (String, Option<LuaValue>)| {
-                let json_body = lua_body_to_json(lua, data);
-
-                let cmd = if json_body.as_object().map_or(false, |o| o.is_empty()) {
-                    hebnix_sdk::stats::websocket::WsCommand::new(command)
-                } else {
-                    hebnix_sdk::stats::websocket::WsCommand {
-                        command,
-                        data: Some(json_body),
-                    }
-                };
-
-                let _ = host.tx.send(AppMsg::SendWsCommand(cmd));
-                Ok(())
-            })?,
-        )?;
-    }
 
     // StatsAPI socket commands.
     {
