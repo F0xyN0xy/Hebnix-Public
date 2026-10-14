@@ -9,8 +9,8 @@ dist/ has 4 variant folders, all from the same 2 exes:
 portable drops a portable.txt next to the exe, which flips the app's base dir
 to the exe folder (the pre 2.1.8 layout). standard has no marker.
 
-Support programs are embedded in the executables and extracted into the base
-dir at runtime (%AppData%\Hebnix, or the exe folder in portable).
+The four folders contain the application executable and optional portable
+marker/PDB. Other bundled assets are extracted by the app when needed.
 
 pdb (target/release/hebnix.pdb, big) is not shipped by default. keep it
 archived per release so you can symbolicate a user's crash.txt later. -WithPdb
@@ -20,11 +20,8 @@ param([switch]$WithPdb)
 
 $ErrorActionPreference = 'Stop'
 $root       = $PSScriptRoot                       # hebnix_rs
-$repoRoot   = Split-Path $root -Parent            # RShebnix
 $releaseDir = Join-Path $root 'target\release'
 $distDir    = Join-Path $root 'dist'
-$bridgeExe  = Join-Path $repoRoot 'rlapi_bridge\dist\rlapi-bridge.exe'
-$steamDll   = Join-Path $root 'vendor\steam_api64.dll'
 
 Write-Host 'building release...' -ForegroundColor Cyan
 Push-Location $root
@@ -48,19 +45,9 @@ try {
     Pop-Location
 }
 
-# everything we bundle must exist
-if (-not (Test-Path $bridgeExe)) {
-    throw "rlapi-bridge.exe missing at $bridgeExe`n  -> build it: rlapi_bridge\build.bat"
-}
-if (-not (Test-Path $steamDll)) {
-    throw "steam_api64.dll missing at $steamDll (should be committed under vendor/)"
-}
 Write-Host 'assembling dist/...' -ForegroundColor Cyan
 if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
 New-Item -ItemType Directory -Path $distDir | Out-Null
-
-# support files
-$support = @($steamDll, $bridgeExe)
 
 $variants = @(
     @{ Name = 'hebnix';               Exe = 'hebnix.exe';      Portable = $false; Pdb = $true  },
@@ -73,7 +60,7 @@ foreach ($v in $variants) {
     $outDir = Join-Path $distDir $v.Name
     New-Item -ItemType Directory -Path $outDir | Out-Null
 
-    $files = @((Join-Path $releaseDir $v.Exe)) + $support
+    $files = @((Join-Path $releaseDir $v.Exe))
     if ($WithPdb -and $v.Pdb) { $files += (Join-Path $releaseDir 'hebnix.pdb') }
 
     foreach ($f in $files) {

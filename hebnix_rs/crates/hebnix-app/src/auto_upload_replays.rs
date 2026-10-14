@@ -15,7 +15,7 @@ use crate::config::ReplayUploadCfg;
 use crate::messages::AppMsg;
 
 const HISTORY_FILE: &str = "replay_upload_history.json";
-const MATCH_HISTORY_SERVICE: &str = "Matches/GetMatchHistory v1";
+use hebnix_sdk::rlapi::session::MATCH_HISTORY_SERVICE;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const POLL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REPLAY_BYTES: u64 = 100 * 1024 * 1024;

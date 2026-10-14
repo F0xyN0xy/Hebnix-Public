@@ -700,17 +700,21 @@ pub struct EnabledRule {
     pub inner: Box<dyn Rule>,
     pub http: Arc<AtomicBool>,
     pub socket: Arc<AtomicBool>,
+    pub game: Arc<AtomicBool>,
 }
 impl Rule for EnabledRule {
     fn matches_host(&self, host: &str) -> bool {
         (self.http.load(Ordering::Relaxed) || self.socket.load(Ordering::Relaxed))
+            && self.game.load(Ordering::Acquire)
             && self.inner.matches_host(host)
     }
     fn strip_request_headers(&self) -> &[&str] {
         self.inner.strip_request_headers()
     }
     fn rewrite(&self, body: &mut Body) -> bool {
-        self.inner.rewrite(body)
+        (self.http.load(Ordering::Relaxed) || self.socket.load(Ordering::Relaxed))
+            && self.game.load(Ordering::Acquire)
+            && self.inner.rewrite(body)
     }
     fn announce(&self) -> Option<String> {
         self.inner.announce()
@@ -718,10 +722,20 @@ impl Rule for EnabledRule {
 }
 
 /// Route the original game authentication and WebSocket, with no data spoofs.
-pub struct RlApiRouteRule;
+pub struct RlApiRouteRule {
+    pub retained: Arc<AtomicBool>,
+    pub game: Arc<AtomicBool>,
+}
+impl RlApiRouteRule {
+    fn routing(&self) -> bool {
+        self.game.load(Ordering::Acquire)
+            && (hebnix_sdk::rlapi::session::shared_game_session().enabled()
+                || self.retained.load(Ordering::Acquire))
+    }
+}
 impl Rule for RlApiRouteRule {
     fn matches_host(&self, host: &str) -> bool {
-        hebnix_sdk::rlapi::session::shared_game_session().enabled()
+        self.routing()
             && (host.eq_ignore_ascii_case(TITLE_HOST)
                 || host.eq_ignore_ascii_case("api.rlpp.psynet.gg"))
     }
@@ -729,7 +743,7 @@ impl Rule for RlApiRouteRule {
         &["if-none-match", "if-modified-since"]
     }
     fn rewrite(&self, body: &mut Body) -> bool {
-        if !hebnix_sdk::rlapi::session::shared_game_session().enabled() {
+        if !self.routing() {
             return false;
         }
         let mut route = RankRule::new(Arc::new(Mutex::new(HashMap::new())));
@@ -741,6 +755,39 @@ impl Rule for RlApiRouteRule {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+    #[test]
+    fn disabling_spoofing_preserves_game_frames_and_can_resume() {
+        let http = Arc::new(AtomicBool::new(true));
+        let socket = Arc::new(AtomicBool::new(false));
+        let game = Arc::new(AtomicBool::new(true));
+        let rule = EnabledRule {
+            inner: Box::new(RankRule::new(Arc::new(Mutex::new(HashMap::from([
+                (1, (19, 1000.0)),
+            ]))))),
+            http: Arc::clone(&http),
+            socket: Arc::clone(&socket),
+            game: Arc::clone(&game),
+        };
+        // An HTTP response already matched before the toggle changed must
+        // obey the new state, just like frames on the retained WebSocket.
+        assert!(rule.matches_host("api.rlpp.psynet.gg"));
+        http.store(false, Ordering::Relaxed);
+        let original = b"PsyResponseID: game_1\r\n\r\n{\"Result\":{\"Skills\":[{\"Playlist\":1,\"Tier\":5,\"Mu\":20}]}}";
+        let mut body = Body::new("text/plain", original.to_vec());
+        assert!(!rule.rewrite(&mut body));
+        assert_eq!(body.bytes, original);
+        assert!(body.set_headers.is_empty());
+        socket.store(true, Ordering::Relaxed);
+        assert!(rule.rewrite(&mut body));
+        assert!(String::from_utf8_lossy(&body.bytes).contains("\"Tier\":19"));
+        game.store(false, Ordering::Release);
+        assert!(!rule.matches_host("api.rlpp.psynet.gg"));
+        let mut idle_body = Body::new("text/plain", original.to_vec());
+        assert!(!rule.rewrite(&mut idle_body));
+        assert_eq!(idle_body.bytes, original);
+        game.store(true, Ordering::Release);
+        assert!(rule.rewrite(&mut idle_body));
+    }
     #[test]
     fn session_only_routing_preserves_skills_and_routes_both_websockets() {
         let mut rule = RankRule::new(Arc::new(Mutex::new(HashMap::new())));

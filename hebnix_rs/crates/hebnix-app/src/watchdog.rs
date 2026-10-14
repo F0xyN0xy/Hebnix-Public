@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
 
 use crate::spoofer::SpooferManager;
@@ -9,10 +9,11 @@ static LIVE_SPOOFER: OnceLock<Arc<SpooferManager>> = OnceLock::new();
 
 pub fn handoff_live_spoofer(spoofer: Arc<SpooferManager>) -> bool {
     if !hebnix_sdk::process::is_rocket_league_running()
-        || !(spoofer.http_running() || spoofer.socket_running() || spoofer.rlapi_running())
+        || !(spoofer.http_running() || spoofer.socket_running() || spoofer.relay_running())
     {
         return false;
     }
+    spoofer.disable_spoofing();
     LIVE_SPOOFER.set(spoofer).is_ok() || LIVE_SPOOFER.get().is_some()
 }
 
@@ -39,14 +40,49 @@ pub fn finish_live_handoff() {
     tracing::info!("Rocket League closed; proxy watchdog cleaned up");
 }
 
-use windows::Win32::System::Threading::{
-    INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
-};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 
 pub const CLEANUP_WATCHDOG_ARG: &str = "--cleanup-watchdog";
+static CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+static RECOVERY_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_ready() -> bool {
+    CHILD.lock().ok().is_some_and(|mut child| {
+        child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    })
+}
+
+pub fn ensure_protected(base_dir: &std::path::Path) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    if !RECOVERY_INSTALLED.load(Ordering::Acquire) {
+        crate::recovery_tasks::install(base_dir)?;
+        RECOVERY_INSTALLED.store(true, Ordering::Release);
+    }
+    if !spawn() {
+        return Err(
+            "Could not start the Epic connection cleanup watchdog. Proxy was left off.".into(),
+        );
+    }
+    Ok(())
+}
 
 pub fn spawn() -> bool {
+    use std::io::Read;
     use std::os::windows::process::CommandExt;
+
+    let Ok(mut child_slot) = CHILD.lock() else {
+        return false;
+    };
+    if child_slot
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    {
+        return true;
+    }
+    *child_slot = None;
 
     if !crate::spoofer::is_admin() {
         return false;
@@ -55,21 +91,58 @@ pub fn spawn() -> bool {
         return false;
     };
     let owner = std::process::id();
-    let _ = std::fs::create_dir_all(watchdog_owner_path().parent().unwrap());
-    let _ = std::fs::write(watchdog_owner_path(), owner.to_string());
+    if std::fs::create_dir_all(watchdog_owner_path().parent().unwrap()).is_err()
+        || std::fs::write(watchdog_owner_path(), owner.to_string()).is_err()
+    {
+        return false;
+    }
+    let Ok(ready) = std::net::TcpListener::bind("127.0.0.1:0") else {
+        return false;
+    };
+    let Ok(address) = ready.local_addr() else {
+        return false;
+    };
+    if ready.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let token = rand::random::<u64>().to_string();
     // Escape a launcher job when Windows allows it; otherwise use a detached
     // child so cleanup can outlive the Hebnix window.
     let start = |flags| {
         std::process::Command::new(&exe)
-            .args([CLEANUP_WATCHDOG_ARG, &owner.to_string()])
+            .args([
+                CLEANUP_WATCHDOG_ARG,
+                &owner.to_string(),
+                &address.to_string(),
+                &token,
+            ])
             .creation_flags(flags)
             .spawn()
     };
-    let spawned = start(0x09000208).or_else(|_| start(0x08000208)).is_ok();
-    if !spawned {
-        let _ = std::fs::remove_file(watchdog_owner_path());
+    if let Ok(mut child) = start(0x09000208).or_else(|_| start(0x08000208)) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok((mut stream, _)) = ready.accept() {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+                let mut received = vec![0; token.len()];
+                if stream.read_exact(&mut received).is_ok()
+                    && received == token.as_bytes()
+                    && matches!(child.try_wait(), Ok(None))
+                {
+                    *child_slot = Some(child);
+                    return true;
+                }
+            }
+            if !matches!(child.try_wait(), Ok(None)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    spawned
+    let _ = std::fs::remove_file(watchdog_owner_path());
+    false
 }
 
 pub fn parent_pid() -> Option<u32> {
@@ -84,15 +157,44 @@ pub fn parent_pid() -> Option<u32> {
 
 pub fn run(parent_pid: u32) {
     if let Ok(parent) = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) } {
+        // Acknowledge only after acquiring a real process handle. This handle
+        // remains valid even if Windows later reuses the parent's PID.
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(index) = args.iter().position(|arg| arg == CLEANUP_WATCHDOG_ARG) {
+            if let (Some(address), Some(token)) = (args.get(index + 2), args.get(index + 3)) {
+                use std::io::Write;
+                if let Ok(mut stream) = std::net::TcpStream::connect(address) {
+                    let _ = stream.write_all(token.as_bytes());
+                }
+            }
+        }
         unsafe {
-            WaitForSingleObject(parent, INFINITE);
+            while WaitForSingleObject(parent, 250) == WAIT_TIMEOUT {
+                // Also protect against a hidden/frozen UI leaving redirects
+                // behind after the game exits.
+                if !hebnix_sdk::process::is_rocket_league_running()
+                    && !replacement_is_running(parent_pid)
+                {
+                    let _ = crate::spoofer::hosts::clear();
+                    let _ = crate::spoofer::clean_session_cache(&crate::config::base_dir());
+                }
+            }
             let _ = CloseHandle(parent);
         }
     }
     if replacement_is_running(parent_pid) {
         return;
     }
-    let _ = crate::spoofer::hosts::clear();
+    // Cleanup retries begin immediately, even while the game is still open.
+    for _ in 0..20 {
+        if replacement_is_running(parent_pid) {
+            return;
+        }
+        if crate::spoofer::hosts::clear().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     while hebnix_sdk::process::is_rocket_league_running() {
         if replacement_is_running(parent_pid) {
             return;
@@ -118,6 +220,7 @@ pub fn run(parent_pid: u32) {
     }
     let _ = crate::multiplayer_lan::cleanup_system_state();
     crate::spoofer::hosts::flush_dns();
+    let _ = crate::spoofer::clean_session_cache(&crate::config::base_dir());
     if watchdog_owner().is_some_and(|owner| owner == parent_pid) {
         let _ = std::fs::remove_file(watchdog_owner_path());
     }

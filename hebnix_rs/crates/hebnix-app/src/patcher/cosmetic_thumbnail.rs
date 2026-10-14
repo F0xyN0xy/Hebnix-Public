@@ -6,6 +6,58 @@ use std::path::Path;
 
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Car-specific engine thumbnail packages often contain only a default asset
+/// with no image. Use the associated body's preview, without changing which
+/// engine package the swapper installs or restores.
+pub(crate) fn body_preview_for_engine(
+    name: &str,
+    upk: &str,
+    bodies: &serde_json::Value,
+) -> Option<String> {
+    let body_items = bodies.get("bodies")?.as_array()?;
+    let engine_key = upk.to_ascii_lowercase();
+    let engine_key = engine_key
+        .strip_prefix("engineaudio_")?
+        .strip_suffix("_sf.upk")?;
+    let engine_key = engine_key
+        .strip_suffix("_oe")
+        .or_else(|| engine_key.strip_suffix("_rev"))
+        .unwrap_or(engine_key);
+    let by_key: Vec<_> = body_items
+        .iter()
+        .filter(|body| {
+            body.get("upk_path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| {
+                    path.to_ascii_lowercase()
+                        .strip_prefix("body_")
+                        .and_then(|path| path.strip_suffix("_sf.upk"))
+                        == Some(engine_key)
+                })
+        })
+        .collect();
+    let matches = if by_key.len() == 1 {
+        by_key
+    } else {
+        body_items
+            .iter()
+            .filter(|body| {
+                body.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|body_name| body_name.eq_ignore_ascii_case(name))
+            })
+            .collect()
+    };
+    if matches.len() != 1 {
+        return None;
+    }
+    matches[0]
+        .get("thumbnail")?
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
 fn word(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
     let data = bytes.get(*at..*at + 4).ok_or("Truncated texture record")?;
     *at += 4;
@@ -443,4 +495,47 @@ fn bake_texture_encoded(
     }
     output.extend_from_slice(tail);
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn engine_body_preview_matches_the_asset_before_the_label() {
+        let bodies = json!({"bodies": [
+            {"name": "Valhalla", "upk_path": "Body_Heaven_SF.upk", "thumbnail": "Body_Heaven_T_SF.upk"},
+            {"name": "Valhalla", "upk_path": "Body_Numb_SF.upk", "thumbnail": "Body_Numb_T_SF.upk"}
+        ]});
+        assert_eq!(
+            body_preview_for_engine("Valhalla", "EngineAudio_HEAVEN_SF.upk", &bodies).as_deref(),
+            Some("Body_Heaven_T_SF.upk")
+        );
+        assert_eq!(
+            body_preview_for_engine("Valhalla", "EngineAudio_Unrelated_SF.upk", &bodies),
+            None
+        );
+    }
+
+    #[test]
+    fn engine_revisions_and_catalog_name_matches_find_the_body() {
+        let bodies = json!({"bodies": [
+            {"name": "Breakout Type-S", "upk_path": "Body_BreakoutMK2_SF.upk", "thumbnail": "Body_BreakoutMK2_T_SF.upk"},
+            {"name": "Esper", "upk_path": "Body_Akira_SF.upk", "thumbnail": "Body_Akira_T_SF.upk"}
+        ]});
+        for variant in [
+            "EngineAudio_BreakoutMK2_OE_SF.upk",
+            "EngineAudio_BreakoutMK2_REV_SF.upk",
+        ] {
+            assert_eq!(
+                body_preview_for_engine("Breakout Type-S v2", variant, &bodies).as_deref(),
+                Some("Body_BreakoutMK2_T_SF.upk")
+            );
+        }
+        assert_eq!(
+            body_preview_for_engine("ESPER", "EngineAudio_AkiraBike_OE_SF.upk", &bodies).as_deref(),
+            Some("Body_Akira_T_SF.upk")
+        );
+    }
 }

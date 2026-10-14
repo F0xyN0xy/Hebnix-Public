@@ -1220,7 +1220,7 @@ impl UpkPackage {
         self.replace_export_payload(slot, &bytes)?;
         Ok(slot)
     }
-    fn repacked(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn repacked(&self) -> Result<Vec<u8>, String> {
         if self.chunks.is_empty() && (self.raw_dirty || self.header_dirty) {
             let mut output = self.image.clone();
             if self.header_dirty && self.key != [0; 32] {

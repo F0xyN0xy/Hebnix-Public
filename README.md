@@ -17,7 +17,7 @@ Install Rust with the MSVC toolchain, then run:
     cd hebnix_rs
     cargo build --release
 
-Build the optional bridge executable with `rlapi_bridge/build.bat`.
+RLAPI uses the existing captured Rocket League WebSocket session; no Go build is required.
 
 Set `$env:HEBNIX_BASE_DIR` to use a different data directory while developing.
 
@@ -31,6 +31,8 @@ There is also a more user friendly build.bat file.
 ## Plugins and themes
 
 See the [plugin examples](hebnix_rs/examples/plugins), [theme examples](hebnix_rs/examples/themes), and [documentation](https://hebnix.com/docs).
+
+Plugins can access WebSocket match history through `hebnix.rlapi.enabled` and `hebnix.rlapi.matchhistory()`. See [the RLAPI plugin API](docs/rlapi-plugin-api.md).
 
 ## Logs
 

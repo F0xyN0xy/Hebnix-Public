@@ -538,6 +538,7 @@ pub struct HebnixApp {
     update_downloading: bool,
     update_error: Option<String>,
     changelog_popup: Option<crate::update::ChangelogEntry>,
+    notification_popup: Option<crate::notifications::Notification>,
     epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     rl_launch_setup_open: bool,
@@ -644,6 +645,11 @@ impl HebnixApp {
         let theme_options = theme::list_themes(&themes_dir);
 
         let (tx, rx) = crossbeam_channel::unbounded::<AppMsg>();
+        crate::notifications::check_on_start(
+            config.notification_id,
+            tx.clone(),
+            cc.egui_ctx.clone(),
+        );
 
         let show_changelog = base_dir.join(".first").exists();
         let launch_marker = base_dir.join(".launch");
@@ -1037,6 +1043,7 @@ impl HebnixApp {
             update_downloading: false,
             update_error: None,
             changelog_popup: None,
+            notification_popup: None,
             epic_repair: Default::default(),
             launch_path_notice: false,
             rl_launch_setup_open: false,
@@ -1099,7 +1106,13 @@ impl HebnixApp {
 
         app.save_friends_internal();
         app.save_ranks_internal();
-        app.evaluate_proxies();
+        app.prompt_for_missing_spoofer_certificate();
+        if let Err(error) = app.spoofer_mgr.start_lifecycle_monitor() {
+            app.disable_certificate_features();
+            app.console.write(format!("[Spoofer] {error}"));
+        } else {
+            app.evaluate_proxies();
+        }
         fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone());
 
         app
@@ -1935,7 +1948,9 @@ impl HebnixApp {
         if !self.spoofer_master {
             if self.spoofer_mgr.socket_running() {
                 self.spoofer_mgr.stop_socket();
-                clear_rl_cache(&self.tx);
+                if !self.spoofer_mgr.relay_running() {
+                    clear_rl_cache(&self.tx);
+                }
             }
             if self.spoofer_mgr.http_running() {
                 self.spoofer_mgr.stop_http();
@@ -1967,9 +1982,8 @@ impl HebnixApp {
         // Rank spoofing uses the same hosts-backed config.psynet.gg reverse
         // proxy as the C# implementation. PsyNet bypasses Windows' HTTP proxy
         // on current clients, so this must not depend on the Title toggle.
-        let needs_socket = (self.spoofer_socket_proxy && self.spoofer_title_enabled)
-            || self.spoofer_rank_enabled
-;
+        let needs_socket = self.spoofer_socket_proxy
+            || (self.spoofer_http_proxy && self.spoofer_rank_enabled);
         if needs_socket && !self.spoofer_mgr.socket_running() {
             if let Err(e) = self.spoofer_mgr.start_socket() {
                 self.console
@@ -1980,7 +1994,7 @@ impl HebnixApp {
         } else if !needs_socket && self.spoofer_mgr.socket_running() {
             self.spoofer_mgr.stop_socket();
             self.console.write("[Spoofer] PsyNet proxy stopped.");
-            if !cache_cleared {
+            if !cache_cleared && !self.spoofer_mgr.relay_running() {
                 clear_rl_cache(&self.tx);
             }
         }
@@ -1996,9 +2010,44 @@ impl HebnixApp {
     fn prompt_for_missing_spoofer_certificate(&mut self) {
         self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
         if self.spoofer_cert_installed {
+            self.spoofer_mgr.certificate_setup_ready();
             self.spoofer_certificate_prompt_open = false;
         } else if self.spoofer_master && (self.spoofer_http_proxy || self.spoofer_socket_proxy) {
-            self.spoofer_certificate_prompt_open = true;
+            match spoofer::ca::install(&self.base_dir) {
+                Ok(()) => {
+                    self.spoofer_cert_installed = true;
+                    self.spoofer_mgr.certificate_setup_ready();
+                    self.spoofer_certificate_prompt_open = false;
+                    self.console.write("[Spoofer] Proxy certificate installed automatically.");
+                }
+                Err(error) => {
+                    self.console.write(format!("[Spoofer] Automatic certificate install failed: {error}"));
+                    self.spoofer_certificate_prompt_open = true;
+                }
+            }
+        }
+    }
+
+    fn disable_certificate_features(&mut self) {
+        self.spoofer_mgr.block_for_certificate_removal();
+        // Preserve the HTTP/WS enable choices; the master and all consumers
+        // turn off so removing trust cannot silently reinstall it next tick.
+        self.spoofer_master = false;
+        self.spoofer_username_enabled = false;
+        self.spoofer_friends_enabled = false;
+        self.spoofer_rank_enabled = false;
+        self.spoofer_title_enabled = false;
+        self.spoofer_certificate_prompt_open = false;
+        self.owned_proxy_prompt_open = false;
+        self.swapper.set_owned_only(false);
+        self.auto_upload_replays.stop();
+        self.spoofer_mgr.set_title_enabled(false);
+        self.spoofer_mgr.set_username("");
+        self.save_friends_internal();
+        self.save_ranks_internal();
+        self.save_config();
+        if hebnix_sdk::process::is_rocket_league_running() {
+            self.console.write("[Spoofer] Proxy disabled. Restart Rocket League to discard its current cached local connection.");
         }
     }
 
@@ -2099,6 +2148,11 @@ impl HebnixApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMsg::Log(s) => self.console.write(s),
+                AppMsg::SpooferCertificateLost => {
+                    self.disable_certificate_features();
+                    self.spoofer_cert_installed = false;
+                    self.console.write("[Spoofer] Certificate trust was removed; proxy features were turned off and redirects cleaned up.");
+                }
                 AppMsg::RlApiCaptureReady(result) => {
                     self.rlapi_panel.starting = false;
                     if let Err(error) = result {
@@ -2275,6 +2329,11 @@ impl HebnixApp {
                     if let Ok(Some(entry)) = result {
                         self.changelog_popup = Some(entry);
                         let _ = std::fs::remove_file(self.base_dir.join(".first"));
+                    }
+                }
+                AppMsg::NotificationFetched(notification) => {
+                    if notification.is_newer_than(self.config.notification_id) {
+                        self.notification_popup = Some(notification);
                     }
                 }
                 AppMsg::AppUpdateFailed { error } => {
@@ -2485,6 +2544,10 @@ impl HebnixApp {
                 }
                 AppMsg::BackgroundChangerDone(result) => {
                     let message = self.workshop.finish_background_changer(result);
+                    self.console.write(message);
+                }
+                AppMsg::MenuMapDone(result) => {
+                    let message = self.workshop.finish_menu_map(result);
                     self.console.write(message);
                 }
                 AppMsg::BackgroundChangerProgress(message) => {
@@ -3444,6 +3507,7 @@ impl HebnixApp {
                                 egui::RichText::new(t("spoofer-requires-admin-for-hosts-file-intercepti"))
                                     .color(egui::Color32::GRAY),
                             );
+                            ui.label(egui::RichText::new(t("spoofer-session-lifecycle")).color(egui::Color32::GRAY));
 
                             ui.add_space(10.0);
                             ui.add_enabled_ui(self.spoofer_master, |ui| {
@@ -3459,7 +3523,7 @@ impl HebnixApp {
                                     if self.spoofer_mgr.http_running() {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
-                                            t("spoofer-running"),
+                                            t(if hebnix_sdk::process::is_rocket_league_running() { "spoofer-running" } else { "spoofer-waiting-for-game" }),
                                         );
                                     } else {
                                         ui.colored_label(
@@ -3487,7 +3551,7 @@ impl HebnixApp {
                                     if self.spoofer_mgr.socket_running() {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
-                                            t("spoofer-running"),
+                                            t(if hebnix_sdk::process::is_rocket_league_running() { "spoofer-running" } else { "spoofer-waiting-for-game" }),
                                         );
                                     } else {
                                         ui.colored_label(
@@ -3511,6 +3575,7 @@ impl HebnixApp {
                                         t("spoofer-installed"),
                                     );
                                     if ui.button(t("spoofer-remove")).clicked() {
+                                        self.disable_certificate_features();
                                         match spoofer::ca::uninstall() {
                                             Ok(()) => {
                                                 self.console
@@ -3519,7 +3584,6 @@ impl HebnixApp {
                                                     spoofer::ca::is_current_installed(
                                                         &self.base_dir,
                                                     );
-                                                self.prompt_for_missing_spoofer_certificate();
                                             }
                                             Err(e) => self.console.write(format!(
                                                 "[Spoofer] Certificate removal failed: {e}"
@@ -6137,6 +6201,7 @@ impl HebnixApp {
                     }
                 }
             }
+            self.spoofer_mgr.certificate_setup_ready();
             self.spoofer_master = true;
             self.spoofer_http_proxy = true;
             self.swapper.set_owned_only(true);
@@ -6180,6 +6245,7 @@ impl HebnixApp {
                 Ok(()) => {
                     self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
                     if self.spoofer_cert_installed {
+                        self.spoofer_mgr.certificate_setup_ready();
                         self.spoofer_certificate_prompt_open = false;
                         self.console.write("[Spoofer] Certificate installed.");
                         self.evaluate_proxies();
@@ -6338,6 +6404,52 @@ impl HebnixApp {
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
             self.changelog_popup = None;
+        }
+    }
+
+    fn render_notification_popup(&mut self, ctx: &egui::Context) {
+        let Some(notification) = self.notification_popup.clone() else {
+            return;
+        };
+        let mut dismissed = false;
+        let id = egui::Id::new("web_notification");
+        egui::Modal::new(id).show(ctx, |ui| {
+            ui.set_width(440.0_f32.min((ctx.content_rect().width() - 48.0).max(120.0)));
+            ui.horizontal(|ui| {
+                ui.heading("Notification");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    dismissed |= ui.button("×").on_hover_text("Dismiss").clicked();
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height((ctx.content_rect().height() * 0.6).max(80.0))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(&notification.message).wrap());
+                });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if let Some(url) = notification.link_url() {
+                    let text = notification
+                        .link_text
+                        .as_deref()
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or("Open link");
+                    if ui.button(text).clicked() {
+                        let _ = open::that(url.as_str());
+                    }
+                }
+                dismissed |= ui.button("Dismiss").clicked();
+            });
+        });
+        let layer = egui::LayerId::new(egui::Order::Foreground, id);
+        ctx.move_to_top(layer);
+        ctx.memory_mut(|memory| memory.set_modal_layer(layer));
+        // Ignore backdrop clicks/Escape: the announcement stays until explicitly closed.
+        if dismissed {
+            self.config.notification_id = self.config.notification_id.max(notification.id);
+            self.save_config();
+            self.notification_popup = None;
         }
     }
 
@@ -8066,6 +8178,9 @@ impl eframe::App for HebnixApp {
         };
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);
+        if !self.hidden {
+            self.render_notification_popup(ctx);
+        }
         self.plugin_mgr.flush_window_positions();
         self.render_game_overlay();
 

@@ -1,17 +1,12 @@
-//! Extract bundled support programs into the shared Hebnix AppData folder.
+//! Initialize the shared data folder and migrate legacy executable data.
 
 use std::path::Path;
-
-const STEAM_API: &[u8] = include_bytes!("../../../vendor/steam_api64.dll");
-const RLAPI_BRIDGE: &[u8] = include_bytes!("../../../../rlapi_bridge/dist/rlapi-bridge.exe");
 
 pub fn ensure_present(base_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(base_dir)?;
     if let Err(error) = migrate_legacy_exe_data(base_dir) {
         tracing::warn!("could not finish legacy data migration: {error}");
     }
-    write_if_changed(&base_dir.join("steam_api64.dll"), STEAM_API)?;
-    write_if_changed(&base_dir.join("rlapi-bridge.exe"), RLAPI_BRIDGE)?;
 
     Ok(())
 }

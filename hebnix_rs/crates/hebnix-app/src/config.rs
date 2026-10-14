@@ -330,6 +330,8 @@ fn normalize_action_entries(
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Last web notification explicitly dismissed by the user.
+    pub notification_id: u64,
     pub window: WindowCfg,
     pub settings: SettingsCfg,
     pub rl_launch: RlLaunchCfg,

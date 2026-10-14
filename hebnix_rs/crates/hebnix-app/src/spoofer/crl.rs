@@ -14,6 +14,7 @@ use crate::spoofer::ca::CRL_PORT;
 pub struct CrlServer {
     running: Arc<AtomicBool>,
     port: u16,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CrlServer {
@@ -29,7 +30,7 @@ impl CrlServer {
         let running = Arc::new(AtomicBool::new(true));
         let crl = Arc::new(crl_der);
 
-        {
+        let worker = {
             let running = Arc::clone(&running);
             std::thread::Builder::new()
                 .name("spoofer-crl".into())
@@ -43,19 +44,34 @@ impl CrlServer {
                         }
                     }
                 })
-                .map_err(|e| format!("cant spawn crl thread: {e}"))?;
-        }
+                .map_err(|e| format!("cant spawn crl thread: {e}"))?
+        };
 
-        Ok((Self { running, port }, port))
+        Ok((
+            Self {
+                running,
+                port,
+                worker: std::sync::Mutex::new(Some(worker)),
+            },
+            port,
+        ))
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 }
 
 fn handle(mut stream: TcpStream, crl: &[u8], tx: &Sender<AppMsg>) {
+    let timeout = Some(std::time::Duration::from_secs(2));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
     let mut buf = [0u8; 1024];
     let _ = stream.read(&mut buf);
     let _ = tx.send(AppMsg::Log(format!(
@@ -70,4 +86,22 @@ fn handle(mut stream: TcpStream, crl: &[u8], tx: &Sender<AppMsg>) {
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(crl);
     let _ = stream.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_listener_releases_port_before_restart() {
+        let (tx, _) = crossbeam_channel::unbounded();
+        let (server, port) = CrlServer::start_on("127.0.0.1:0", vec![1, 2, 3], tx.clone()).unwrap();
+        server.stop();
+        for _ in 0..5 {
+            let (server, _) =
+                CrlServer::start_on(&format!("127.0.0.1:{port}"), vec![1, 2, 3], tx.clone())
+                    .unwrap();
+            server.stop();
+        }
+    }
 }

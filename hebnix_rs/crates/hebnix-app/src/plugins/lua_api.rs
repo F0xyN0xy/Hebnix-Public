@@ -29,8 +29,7 @@ pub struct HostShared {
     pub rl_connected: bool,
     pub in_match: bool,
     pub app_version: String,
-    /// detected game platform ("steam", "epic", or "" if unknown). default for
-    /// eos/rlapi calls that don't pass one.
+    /// Detected game platform ("steam", "epic", or "" if unknown).
     pub platform: String,
     pub suppress_plugin_logs: bool,
     /// Directory containing DefaultStatsAPI.ini and the game configuration
@@ -752,147 +751,7 @@ fn play_audio(
     });
 }
 
-// EOS token + RLAPI (PsyNet) access for plugins
-//
-// Both run off the UI thread (token acquisition and PsyNet calls block on
-// network / the Steam DLL / the bridge subprocess). Plugins enqueue work and
-// Poll for the result using the same asynchronous result pattern.
-
-use hebnix_sdk::eos::{self, EOSToken, Platform as EosPlatform};
-use hebnix_sdk::rlapi::session::shared_game_session;
-
-/// parse a user platform string into an eos platform
-fn parse_eos_platform(s: &str) -> Option<EosPlatform> {
-    match s.trim().to_lowercase().as_str() {
-        "steam" => Some(EosPlatform::Steam),
-        "epic" | "epicgames" => Some(EosPlatform::Epic),
-        _ => None,
-    }
-}
-
-/// pick the platform for an eos/rlapi call: explicit arg wins, then the
-/// detected game platform, then steam as a last resort.
-fn resolve_platform(host: &Rc<HostCtx>, explicit: Option<String>) -> Option<EosPlatform> {
-    if let Some(p) = explicit.as_deref().and_then(parse_eos_platform) {
-        return Some(p);
-    }
-    let detected = host.shared.borrow().platform.clone();
-    parse_eos_platform(&detected).or(Some(EosPlatform::Steam))
-}
-
-// --- EOS tokens (keyed by platform; cached, re-fetched when expired) ---
-
-enum AsyncEos {
-    Pending,
-    Done(Option<EOSToken>),
-}
-
-fn async_eos() -> &'static std::sync::Mutex<std::collections::HashMap<String, AsyncEos>> {
-    static MAP: OnceLock<std::sync::Mutex<std::collections::HashMap<String, AsyncEos>>> =
-        OnceLock::new();
-    MAP.get_or_init(Default::default)
-}
-
-/// process-wide cache of valid eos tokens, keyed by platform
-fn eos_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, EOSToken>> {
-    static MAP: OnceLock<std::sync::Mutex<std::collections::HashMap<String, EOSToken>>> =
-        OnceLock::new();
-    MAP.get_or_init(Default::default)
-}
-
-/// valid eos token for platform, fetching only if the cache is empty/expired.
-/// the lock is held across the fetch on purpose: it serializes token grabs so
-/// we never make two steam tickets at once (steam rejects the 2nd as
-/// invalid_external_auth_token). concurrent callers block then reuse the token.
-pub fn get_or_fetch_eos(platform: EosPlatform) -> Option<EOSToken> {
-    let mut cache = eos_cache().lock().unwrap();
-    if let Some(tok) = cache.get(platform.as_str()) {
-        if !tok.expired() {
-            return Some(tok.clone());
-        }
-    }
-    let token = eos::get_eos_token(platform);
-    if let Some(tok) = &token {
-        cache.insert(platform.as_str().to_string(), tok.clone());
-    }
-    token
-}
-
-fn eos_queue() -> &'static crossbeam_channel::Sender<EosPlatform> {
-    static QUEUE: OnceLock<crossbeam_channel::Sender<EosPlatform>> = OnceLock::new();
-    QUEUE.get_or_init(|| {
-        let (tx, rx) = crossbeam_channel::unbounded::<EosPlatform>();
-        std::thread::Builder::new()
-            .name("eos-worker".into())
-            .spawn(move || {
-                while let Ok(platform) = rx.recv() {
-                    let token = get_or_fetch_eos(platform);
-                    async_eos()
-                        .lock()
-                        .unwrap()
-                        .insert(platform.as_str().to_string(), AsyncEos::Done(token));
-                }
-            })
-            .ok();
-        tx
-    })
-}
-
-// --- RLAPI / PsyNet requests (one shared session, lazily connected) ---
-
-struct RlApiJob {
-    key: String,
-    platform: EosPlatform,
-    service: String,
-    body: serde_json::Value,
-}
-
-enum AsyncRpc {
-    Pending,
-    Done {
-        ok: bool,
-        result: serde_json::Value,
-        error: String,
-    },
-}
-
-fn async_rpc() -> &'static std::sync::Mutex<std::collections::HashMap<String, AsyncRpc>> {
-    static MAP: OnceLock<std::sync::Mutex<std::collections::HashMap<String, AsyncRpc>>> =
-        OnceLock::new();
-    MAP.get_or_init(Default::default)
-}
-
-fn store_rpc(key: &str, ok: bool, result: serde_json::Value, error: String) {
-    async_rpc()
-        .lock()
-        .unwrap()
-        .insert(key.to_string(), AsyncRpc::Done { ok, result, error });
-}
-
-fn rlapi_queue() -> &'static crossbeam_channel::Sender<RlApiJob> {
-    static QUEUE: OnceLock<crossbeam_channel::Sender<RlApiJob>> = OnceLock::new();
-    QUEUE.get_or_init(|| {
-        let (tx, rx) = crossbeam_channel::unbounded::<RlApiJob>();
-        std::thread::Builder::new()
-            .name("rlapi-worker".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    // The existing platform argument remains accepted for Lua
-                    // compatibility. Requests always use the active game's
-                    // account; never mint credentials or log in a second time.
-                    let _platform = job.platform;
-                    match shared_game_session().request(&job.service, job.body) {
-                        Ok(value) => store_rpc(&job.key, true, value, String::new()),
-                        Err(error) => store_rpc(&job.key, false, serde_json::Value::Null, error),
-                    }
-                }
-            })
-            .expect("could not start RLAPI request worker");
-        tx
-    })
-}
-/// optional lua body table to a json object (empty obj when absent, so
-/// no-arg psynet services get {} not [])
+/// Optional Lua body to a JSON object for plugin Stats API commands.
 fn lua_body_to_json(lua: &Lua, body: Option<LuaValue>) -> serde_json::Value {
     match body {
         None | Some(LuaValue::Nil) => serde_json::json!({}),
@@ -902,13 +761,6 @@ fn lua_body_to_json(lua: &Lua, body: Option<LuaValue>) -> serde_json::Value {
             Err(_) => serde_json::json!({}),
         },
     }
-}
-
-/// monotonic request-key gen for one-shot rlapi calls
-fn next_rpc_key() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    format!("rpc:{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
 /// normalize platform names to profile service slugs
@@ -1379,11 +1231,11 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         cvar.set(
             "register",
             lua.create_function(move |_, name: String| {
-                let result = register_host
-                    .shared
-                    .borrow_mut()
-                    .cvars
-                    .register(&name, &register_host.slug, Rc::clone(&register_host.store));
+                let result = register_host.shared.borrow_mut().cvars.register(
+                    &name,
+                    &register_host.slug,
+                    Rc::clone(&register_host.store),
+                );
                 if let Err(error) = &result {
                     register_host.log(&format!("Error: {error}."));
                 }
@@ -2035,8 +1887,6 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         })?,
     )?;
 
-    // eos tokens + rlapi (psynet)
-
     // The detected platform of the running game ("steam" / "epic" / "").
     {
         let host = Rc::clone(&host);
@@ -2045,112 +1895,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             lua.create_function(move |_, ()| Ok(host.shared.borrow().platform.clone()))?,
         )?;
     }
-
-    // Non-blocking EOS token acquisition. `platform` is optional and defaults
-    // to the detected platform (then Steam). Returns the platform key to poll
-    // with hebnix.eos_result(key), or nil if no platform could be determined.
-    {
-        let host = Rc::clone(&host);
-        hebnix.set(
-            "eos_token_async",
-            lua.create_function(move |_, platform: Option<String>| {
-                let Some(plat) = resolve_platform(&host, platform) else {
-                    return Ok(None);
-                };
-                let key = plat.as_str().to_string();
-                let mut map = async_eos().lock().unwrap();
-                let needs_fetch = match map.get(&key) {
-                    Some(AsyncEos::Pending) => false,
-                    Some(AsyncEos::Done(Some(tok))) => tok.expired(),
-                    _ => true,
-                };
-                if needs_fetch {
-                    map.insert(key.clone(), AsyncEos::Pending);
-                    drop(map);
-                    let _ = eos_queue().send(plat);
-                }
-                Ok(Some(key))
-            })?,
-        )?;
-    }
-
-    // Returns nil (never requested), "pending", nil-on-failure, or a token
-    // table {access_token, refresh_token, account_id, steam_id, expires_at,
-    // platform}.
-    hebnix.set(
-        "eos_result",
-        lua.create_function(|lua, key: String| {
-            let map = async_eos().lock().unwrap();
-            match map.get(&key) {
-                None => Ok(LuaValue::Nil),
-                Some(AsyncEos::Pending) => Ok(LuaValue::String(lua.create_string("pending")?)),
-                Some(AsyncEos::Done(None)) => Ok(LuaValue::Boolean(false)),
-                Some(AsyncEos::Done(Some(tok))) => Ok(to_lua(lua, tok)?),
-            }
-        })?,
-    )?;
-
-    // Non-blocking PsyNet request. `service` e.g. "Skills/GetPlayerSkill v1";
-    // `body` an optional table; `platform` optional (defaults to detected).
-    // Returns a request key to poll with hebnix.rlapi_result(key).
-    // Enable RLAPI capture in Hebnix first. Uses the game connection without logging in.
-    {
-        let host = Rc::clone(&host);
-        hebnix.set(
-            "rlapi_request_async",
-            lua.create_function(
-                move |lua, (service, body, platform): (String, Option<LuaValue>, Option<String>)| {
-                    let service = service.trim().to_string();
-                    if service.is_empty() {
-                        return Ok(None);
-                    }
-                    let Some(plat) = resolve_platform(&host, platform) else {
-                        return Ok(None);
-                    };
-                    let json_body = lua_body_to_json(lua, body);
-                    let key = next_rpc_key();
-                    async_rpc().lock().unwrap().insert(key.clone(), AsyncRpc::Pending);
-                    let _ = rlapi_queue().send(RlApiJob {
-                        key: key.clone(),
-                        platform: plat,
-                        service,
-                        body: json_body,
-                    });
-                    Ok(Some(key))
-                },
-            )?,
-        )?;
-    }
-
-    // Returns nil (unknown key), "pending", or a result table
-    // {ok=bool, result=table, error=string}. A completed result is consumed
-    // (removed) on read, so poll once you get a table.
-    hebnix.set(
-        "rlapi_result",
-        lua.create_function(|lua, key: String| {
-            let mut map = async_rpc().lock().unwrap();
-            match map.get(&key) {
-                None => Ok(LuaValue::Nil),
-                Some(AsyncRpc::Pending) => Ok(LuaValue::String(lua.create_string("pending")?)),
-                Some(AsyncRpc::Done { .. }) => {
-                    let Some(AsyncRpc::Done { ok, result, error }) = map.remove(&key) else {
-                        unreachable!()
-                    };
-                    let table = lua.create_table()?;
-                    table.set("ok", ok)?;
-                    table.set("result", to_lua(lua, &result)?)?;
-                    table.set("error", error)?;
-                    Ok(LuaValue::Table(table))
-                }
-            }
-        })?,
-    )?;
-
-    // Whether the shared PsyNet session is currently connected.
-    hebnix.set(
-        "rlapi_connected",
-        lua.create_function(|_, ()| Ok(shared_game_session().connected()))?,
-    )?;
+    hebnix.set("rlapi", crate::plugins::rlapi::api_table(lua)?)?;
 
     // Audio Control
     let audio = lua.create_table()?;
@@ -2986,7 +2731,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
     hebnix.set(
         "process_running",
         lua.create_function(|_, name: String| {
-            Ok(hebnix_sdk::eos::memory::find_process(&name).is_some())
+            Ok(hebnix_sdk::process::find_process(&name).is_some())
         })?,
     )?;
 

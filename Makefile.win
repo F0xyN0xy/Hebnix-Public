@@ -1,89 +1,31 @@
 # Windows Makefile for Hebnix
 # Usage: nmake /F Makefile.win [target]
-# Targets: all, build, bridge, install-deps, package, clean
-
-!IFNDEF CONFIGURATION
-CONFIGURATION=release
-!ENDIF
+# Targets: all, build, package, clean
 
 HEBNIX_RS_DIR=hebnix_rs
-RLAPI_BRIDGE_DIR=rlapi_bridge
-VENDOR_DIR=$(HEBNIX_RS_DIR)\vendor
 DIST_DIR=$(HEBNIX_RS_DIR)\dist
-TARGET_DIR=$(HEBNIX_RS_DIR)\target\$(CONFIGURATION)
 
-.PHONY: all build bridge install-deps clean package check-rust check-go help
+.PHONY: all build clean package check-rust help
 
-# Default target
-all: check-rust check-go install-deps bridge build
+all: build
 
-# Display help
 help:
 	@echo Windows build targets for Hebnix:
-	@echo.
-	@echo   all           - Build everything (default)
-	@echo   build         - Build Rust components only
-	@echo   bridge        - Build rlapi-bridge only
-	@echo   install-deps  - Download and install third-party dependencies
+	@echo   all           - Build Rust components (default)
+	@echo   build         - Build Rust components
 	@echo   package       - Build release and create distribution package
 	@echo   clean         - Remove build artifacts
 	@echo   check-rust    - Verify Rust toolchain is installed
-	@echo   check-go      - Verify Go toolchain is installed
-	@echo.
-	@echo Configuration: $(CONFIGURATION) (set CONFIGURATION=debug for debug build)
 
-# Check if Rust is installed
 check-rust:
 	@where cargo >nul 2>&1 || (echo ERROR: Rust not found. Install from https://rustup.rs && exit 1)
-	@echo Rust toolchain found
 
-# Check if Go is installed
-check-go:
-	@where go >nul 2>&1 || (echo ERROR: Go not found. Install from https://go.dev/dl/ && exit 1)
-	@echo Go toolchain found
-
-# Install third-party dependencies
-install-deps: install-deps-steam
-
-# Check for steam_api64.dll
-install-deps-steam:
-	@if not exist "$(VENDOR_DIR)\steam_api64.dll" ( \
-		echo WARNING: steam_api64.dll not found in $(VENDOR_DIR) && \
-		echo You must manually download the Steamworks SDK from: && \
-		echo https://partner.steamgames.com/downloads/list && \
-		echo Extract steam_api64.dll to $(VENDOR_DIR)\ && \
-		exit 1 \
-	) else (echo steam_api64.dll found)
-
-# Build rlapi-bridge
-bridge: check-go
-	@echo Building rlapi-bridge...
-	@cd $(RLAPI_BRIDGE_DIR) && build.bat
-	@if not exist "$(RLAPI_BRIDGE_DIR)\dist\rlapi-bridge.exe" (echo ERROR: rlapi-bridge build failed && exit 1)
-	@echo rlapi-bridge built successfully
-
-# Build Rust components
 build: check-rust
-	@echo Building Hebnix Rust components ($(CONFIGURATION))...
 	@cd $(HEBNIX_RS_DIR) && cargo build --release --bin hebnix
 	@cd $(HEBNIX_RS_DIR) && cargo build --release --bin hebnix-lite --features lite
-	@echo Rust build completed successfully
 
-# Package distribution
-package: check-rust check-go install-deps bridge
-	@echo Creating distribution package...
+package: check-rust
 	@cd $(HEBNIX_RS_DIR) && powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
-	@echo Package created in $(DIST_DIR)
 
-# Clean build artifacts
 clean:
-	@echo Cleaning build artifacts...
-	@if exist "$(TARGET_DIR)" rmdir /S /Q "$(TARGET_DIR)"
-	@if exist "$(DIST_DIR)" rmdir /S /Q "$(DIST_DIR)"
-	@if exist "$(RLAPI_BRIDGE_DIR)\dist" rmdir /S /Q "$(RLAPI_BRIDGE_DIR)\dist"
-	@if exist "$(RLAPI_BRIDGE_DIR)\vendor" rmdir /S /Q "$(RLAPI_BRIDGE_DIR)\vendor"
-	@echo Clean completed
-
-# Clean everything including third-party dependencies
-clean-all: clean
-	@echo Full clean completed
+	@build.bat clean

@@ -2,8 +2,6 @@
 //  - embed a per-monitor-v2 dpi manifest (applies before any window exists,
 //    dodges the ambiguous default-dpi mode behind the mixed-dpi drag bugs)
 //  - embed hebnix.ico as the exe icon plus a per-bin version block
-//  - copy the shared runtime binaries (steam_api64.dll, rlapi-bridge.exe)
-//    next to the built exe so a plain build just runs
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +25,6 @@ fn main() {
 
     embed_locales();
     embed_multiplayer_assets();
-    copy_runtime_binaries();
 }
 
 /// bakes every locales/<code>/*.ftl into the exe. adding a language is just
@@ -70,7 +67,8 @@ fn embed_locales() {
     }
     out.push_str("];\n");
 
-    let out_path = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("locales_embedded.rs");
+    let out_path =
+        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("locales_embedded.rs");
     std::fs::write(out_path, out).expect("failed to write locales_embedded.rs");
 }
 
@@ -87,7 +85,9 @@ fn embed_multiplayer_assets() {
         for entry in std::fs::read_dir(dir)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()))
         {
-            let path = entry.expect("failed to read multiplayer asset entry").path();
+            let path = entry
+                .expect("failed to read multiplayer asset entry")
+                .path();
             if path.is_dir() {
                 collect_files(&path, files);
             } else if path.is_file() {
@@ -116,8 +116,8 @@ fn embed_multiplayer_assets() {
     }
     out.push_str("];\n");
 
-    let out_path = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"))
-        .join("multiplayer_assets.rs");
+    let out_path =
+        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("multiplayer_assets.rs");
     std::fs::write(out_path, out).expect("failed to write multiplayer asset manifest");
 }
 
@@ -222,59 +222,4 @@ END
     std::fs::write(&out, body).expect("failed to write generated version resource");
 
     out
-}
-
-fn copy_runtime_binaries() {
-    let Some(profile_dir) = profile_output_dir() else {
-        println!("cargo:warning=hebnix: couldn't find build output dir, skipping runtime copy");
-        return;
-    };
-
-    // crates/hebnix-app -> hebnix_rs -> repo root
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-    let workspace_root = manifest_dir.join("..").join("..");
-
-    let repo_root = workspace_root.join("..");
-
-    let vendor = workspace_root.join("vendor");
-
-    copy_file(
-        &vendor.join("steam_api64.dll"),
-        &profile_dir,
-        "steam_api64.dll missing from hebnix_rs/vendor/ - restore it",
-    );
-
-    copy_file(
-        &repo_root
-            .join("rlapi_bridge")
-            .join("dist")
-            .join("rlapi-bridge.exe"),
-        &profile_dir,
-        "rlapi-bridge.exe missing - run rlapi_bridge/build.bat (RLAPI off until then)",
-    );
-
-}
-
-fn copy_file(src: &Path, profile_dir: &Path, missing_hint: &str) {
-    println!("cargo:rerun-if-changed={}", src.display());
-
-    if !src.is_file() {
-        println!("cargo:warning=hebnix: {missing_hint}");
-        return;
-    }
-
-    let dst = profile_dir.join(src.file_name().unwrap_or_default());
-
-    if let Err(e) = std::fs::copy(src, &dst) {
-        println!("cargo:warning=hebnix: copy {} failed: {e}", src.display());
-    }
-}
-
-// target/<profile>/ derived from
-// OUT_DIR = target/<profile>/build/<pkg>/out
-fn profile_output_dir() -> Option<PathBuf> {
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR")?);
-
-    out_dir.ancestors().nth(3).map(Path::to_path_buf)
 }

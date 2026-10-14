@@ -23,11 +23,14 @@ use crate::multiplayer_lan::{
     find_sidecar_dir, is_local_map_id, redact, tailnet_auth_key, valid_map_id,
 };
 mod archive;
+mod banner_image;
 mod background_changer;
+mod menu_map;
 mod local_import;
 mod steam_download;
 use archive::ArchiveBrowser;
 use background_changer::BackgroundChangerState;
+use menu_map::MenuMapState;
 use steam_download::SteamDownloader;
 
 /// common Workshop multiplayer problems (VPNs/proxies, firewalls) and fixes
@@ -677,6 +680,13 @@ pub fn spawn_image_fetch(
             }
             result
         };
+        let bytes = bytes.and_then(|bytes| match banner_image::prepare(bytes) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                tracing::warn!(%key, %error, "Failed to decode banner image");
+                None
+            }
+        });
         let _ = tx.send(done(key, bytes.unwrap_or_default()));
         ctx.request_repaint();
     });
@@ -693,9 +703,10 @@ pub enum ImageState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkshopView {
     Browse,
-    BackgroundChanger,
-    Multiplayer,
     Import,
+    BackgroundChanger,
+    MenuMap,
+    Multiplayer,
 }
 
 struct MultiplayerState {
@@ -823,6 +834,7 @@ pub struct WorkshopState {
     pub confirm_delete: Option<Value>,
     view: WorkshopView,
     background_changer: BackgroundChangerState,
+    menu_map: MenuMapState,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
@@ -863,6 +875,7 @@ impl WorkshopState {
             confirm_delete: None,
             view: WorkshopView::Browse,
             background_changer: BackgroundChangerState::default(),
+            menu_map: MenuMapState::default(),
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
@@ -875,6 +888,10 @@ impl WorkshopState {
 
     pub fn finish_background_changer(&mut self, result: Result<String, String>) -> String {
         self.background_changer.finish(result)
+    }
+
+    pub fn finish_menu_map(&mut self, result: Result<String, String>) -> String {
+        self.menu_map.finish(result)
     }
 
     pub fn update_background_changer_progress(&mut self, message: String) -> String {
@@ -989,18 +1006,20 @@ impl WorkshopState {
         self.rl_launch = rl_launch.clone();
         let ctx = ui.ctx().clone();
 
+        let previous_view = self.view;
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Browse,
                 t("render-browse-maps"),
             );
+            ui.selectable_value(&mut self.view, WorkshopView::Import, t("render-import-map"));
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::BackgroundChanger,
                 t("render-background-changer"),
             );
-            ui.selectable_value(&mut self.view, WorkshopView::Import, t("render-import-map"));
+            ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Multiplayer,
@@ -1044,6 +1063,11 @@ impl WorkshopState {
         }
         if self.view == WorkshopView::BackgroundChanger {
             self.background_changer.render(ui, rl_path, tx);
+            return;
+        }
+        if self.view == WorkshopView::MenuMap {
+            if previous_view != WorkshopView::MenuMap { self.menu_map.refresh(rl_path); }
+            self.menu_map.render(ui, rl_path, tx);
             return;
         }
 

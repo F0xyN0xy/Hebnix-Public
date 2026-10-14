@@ -29,6 +29,43 @@ pub enum SwapCategory {
     Wheels,
 }
 
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn engine_preview_does_not_change_the_thumbnail_swap_destination() {
+        let bodies = json!({"bodies": [{
+            "name": "007's Aston Martin DB5", "upk_path": "body_amber_SF.upk",
+            "thumbnail": "body_Amber_T_SF.upk"
+        }]});
+        let engines = json!({"engines": [{
+            "name": "007's Aston Martin DB5", "upk_path": "engineaudio_amber_SF.upk",
+            "thumbnail": "EngineAudio_Amber_T_SF.upk"
+        }]});
+        let items = SwapperState::parse_catalog(SwapCategory::Engines, &engines, &bodies).unwrap();
+        let item = &items[0];
+        let root = std::env::temp_dir().join(format!("hebnix-preview-{}", rand::random::<u64>()));
+        let backups = root.join("Backups");
+        fs::create_dir_all(&backups).unwrap();
+        let body = root.join("body_Amber_T_SF.upk");
+        let engine = root.join("EngineAudio_Amber_T_SF.upk");
+        fs::write(&body, b"body preview").unwrap();
+        fs::write(&engine, b"engine thumbnail stub").unwrap();
+        assert_eq!(preview_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("body_Amber_T_SF.upk"));
+        assert_eq!(inferred_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("EngineAudio_Amber_T_SF.upk"));
+        let body_backup = backups.join("body_Amber_T_SF.upk.bak");
+        fs::rename(&body, &body_backup).unwrap();
+        fs::remove_file(&engine).unwrap();
+        assert_eq!(preview_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("body_Amber_T_SF.upk"));
+        assert_eq!(inferred_thumbnail(SwapCategory::Engines, item, &root), None);
+        fs::remove_file(body_backup).unwrap();
+        fs::remove_dir(backups).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+}
+
 impl SwapCategory {
     pub const ALL: [Self; 13] = [
         Self::Antennas,
@@ -95,6 +132,8 @@ struct SwapItem {
     upk: String,
     path: Option<String>,
     thumbnail: Option<String>,
+    /// Associated car image for engine cards; never an installation destination.
+    body_preview: Option<String>,
     audio_bnk: Option<String>,
     upk_type: String,
     product_id: Option<i64>,
@@ -170,18 +209,22 @@ fn inferred_thumbnail(category: SwapCategory, item: &SwapItem, cooked_pc: &Path)
     None
 }
 
+fn preview_thumbnail(category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> Option<String> {
+    if category == SwapCategory::Engines {
+        if let Some(name) = item.body_preview.as_ref().filter(|name| {
+            cooked_pc.join(name).is_file()
+                || cooked_pc.join("Backups").join(format!("{name}.bak")).is_file()
+        }) {
+            return Some(name.clone());
+        }
+    }
+    inferred_thumbnail(category, item, cooked_pc)
+}
+
 // Preview availability must never determine whether an installed item is listed.
 fn source_upks_available(_category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> bool {
     cooked_pc.join(&item.upk).is_file()
 }
-fn explosion_thumbnail_asset(item: &SwapItem) -> Option<String> {
-    let object = item.path.as_deref()?.split('.').next_back()?;
-    (!object.is_empty()).then(|| {
-        let thumbnail = format!("{object}_TThumbnail");
-        format!("{thumbnail}.{thumbnail}")
-    })
-}
-
 fn prettify_car_key(key: &str) -> String {
     key.split('_')
         .filter(|part| !part.is_empty())
@@ -388,7 +431,7 @@ impl SwapperState {
                     .iter()
                     .map(|item| ResolvedItem {
                         available: source_upks_available(category, item, &cooked_pc),
-                        thumbnail: inferred_thumbnail(category, item, &cooked_pc),
+                        thumbnail: preview_thumbnail(category, item, &cooked_pc),
                     })
                     .collect();
                 let mut cars = if category == SwapCategory::Skins {
@@ -515,7 +558,10 @@ impl SwapperState {
             self.thumbnails.insert(key.clone(), None);
             let _ = self.thumbnail_jobs.send((
                 key,
-                cooked_pc.join(filename),
+                {
+                    let backup = cooked_pc.join("Backups").join(format!("{filename}.bak"));
+                    if backup.is_file() { backup } else { cooked_pc.join(filename) }
+                },
                 category.slug().to_string(),
                 ui.ctx().clone(),
             ));
@@ -651,6 +697,13 @@ impl SwapperState {
             }
         }
         let mut seen = HashSet::new();
+        if category == SwapCategory::Engines {
+            for item in &mut items {
+                item.body_preview = crate::cosmetic_thumbnail::body_preview_for_engine(
+                    &item.name, &item.upk, bodies,
+                );
+            }
+        }
         items.retain(|item| seen.insert(item.upk.to_ascii_lowercase()));
         items.sort_by(|a, b| {
             a.name
@@ -688,6 +741,7 @@ impl SwapperState {
                 .get("thumbnail")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            body_preview: None,
             audio_bnk: value
                 .get("audio_bnk")
                 .and_then(Value::as_str)
@@ -850,20 +904,19 @@ impl SwapperState {
                 } else {
                     &source_live
                 };
-                let donor_thumbnail_asset = (category == SwapCategory::Goals)
-                    .then(|| explosion_thumbnail_asset(source))
-                    .flatten();
-                let target_thumbnail_asset = (category == SwapCategory::Goals)
-                    .then(|| explosion_thumbnail_asset(target))
-                    .flatten();
-                if let Err(error) = crate::cosmetic_upk::patch_for_target(
-                    thumbnail_source,
-                    &target_backup,
-                    &target_live,
-                    &self.base_dir,
-                    donor_thumbnail_asset.as_deref(),
-                    target_thumbnail_asset.as_deref(),
-                ) {
+                let thumbnail_result = (|| {
+                    let donor_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                        thumbnail_source, &self.base_dir, source.path.as_deref(),
+                    )?;
+                    let target_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                        &target_backup, &self.base_dir, target.path.as_deref(),
+                    )?;
+                    crate::cosmetic_upk::patch_for_target(
+                        thumbnail_source, &target_backup, &target_live, &self.base_dir,
+                        Some(&donor_asset), Some(&target_asset),
+                    )
+                })();
+                if let Err(error) = thumbnail_result {
                     let _ = fs::copy(
                         backups_dir.join(format!("{}.bak", target.upk)),
                         cooked_pc.join(&target.upk),
@@ -1186,7 +1239,7 @@ impl SwapperState {
                     // catalog thumbnail. A patched target thumbnail can be unreadable by
                     // the preview extractor even though Rocket League accepts the package.
                     let source_path = source_item
-                        .and_then(|item| inferred_thumbnail(category?, item, cooked_pc))
+                        .and_then(|item| preview_thumbnail(category?, item, cooked_pc))
                         .map(|filename| {
                             let backup = backups_dir.join(format!("{filename}.bak"));
                             if backup.is_file() {

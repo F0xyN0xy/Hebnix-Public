@@ -19,7 +19,7 @@ use tungstenite::http::{HeaderName, HeaderValue};
 use tungstenite::{Error, Message, accept_hdr, connect};
 
 use crate::messages::AppMsg;
-use crate::spoofer::rules::{Body, RankRule, Rule};
+use crate::spoofer::rules::{Body, EnabledRule, RankRule, Rule};
 
 const LISTEN_ADDR: &str = "127.0.0.1:8025";
 const UPSTREAM_HOST: &str = "ws.rlpp.psynet.gg";
@@ -34,12 +34,15 @@ const FORWARD_HEADERS: &[&str] = &[
 
 pub struct SkillBridge {
     running: Arc<AtomicBool>,
-
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SkillBridge {
     pub fn start(
         ranks: Arc<Mutex<HashMap<i32, (i32, f64)>>>,
+        http_active: Arc<AtomicBool>,
+        socket_active: Arc<AtomicBool>,
+        game_present: Arc<AtomicBool>,
         tx: Sender<AppMsg>,
         dump_path: PathBuf,
     ) -> Result<Self, String> {
@@ -59,7 +62,7 @@ impl SkillBridge {
         let thread_connections = Arc::clone(&connections);
         let thread_running = Arc::clone(&running);
         let thread_tx = tx.clone();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("rank-skill-bridge".into())
             .spawn(move || {
                 for stream in listener.incoming() {
@@ -68,6 +71,9 @@ impl SkillBridge {
                     }
                     let Ok(stream) = stream else { continue };
                     let ranks = Arc::clone(&ranks);
+                    let http_active = Arc::clone(&http_active);
+                    let socket_active = Arc::clone(&socket_active);
+                    let game_present = Arc::clone(&game_present);
                     let tx = thread_tx.clone();
                     let dump_path = dump_path.clone();
                     let connections = Arc::clone(&thread_connections);
@@ -76,6 +82,9 @@ impl SkillBridge {
                         if let Err(error) = handle_connection(
                             stream,
                             ranks,
+                            http_active,
+                            socket_active,
+                            game_present,
                             connections,
                             running,
                             &dump_path,
@@ -90,12 +99,16 @@ impl SkillBridge {
             .map_err(|error| format!("cannot start rank websocket bridge: {error}"))?;
         Ok(Self {
             running,
+            worker: Mutex::new(Some(worker)),
         })
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = TcpStream::connect(LISTEN_ADDR);
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(worker) = worker.take() { let _ = worker.join(); }
+        }
     }
 
 }
@@ -103,10 +116,17 @@ impl SkillBridge {
 fn handle_connection(
     stream: TcpStream,
     ranks: Arc<Mutex<HashMap<i32, (i32, f64)>>>,
+    http_active: Arc<AtomicBool>,
+    socket_active: Arc<AtomicBool>,
+    game_present: Arc<AtomicBool>,
     connections: Arc<AtomicUsize>,
     running: Arc<AtomicBool>,
     dump_path: &std::path::Path,
 ) -> Result<(), String> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))
+        .map_err(|error| format!("websocket handshake timeout: {error}"))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(15)))
+        .map_err(|error| format!("websocket write timeout: {error}"))?;
     let request_state = Arc::new(Mutex::new(None::<(String, Vec<(String, String)>)>));
     let callback_state = Arc::clone(&request_state);
     let mut local = accept_hdr(stream, move |request: &Request, response: Response| {
@@ -185,7 +205,12 @@ fn handle_connection(
     let session = shared_game_session();
     let game_connection = has_session.then(|| session.attach());
     let mut pending = PendingRequests::default();
-    let rule = RankRule::new(ranks);
+    let rule = EnabledRule {
+        inner: Box::new(RankRule::new(ranks)),
+        http: http_active,
+        socket: socket_active,
+        game: game_present,
+    };
     while running.load(Ordering::Relaxed) {
         let mut progressed = false;
         flush_socket(&mut local)?;

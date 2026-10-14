@@ -36,6 +36,7 @@ mod monitor;
 mod multiplayer_assets;
 #[path = "multiplayer-lan/mod.rs"]
 mod multiplayer_lan;
+mod notifications;
 mod overlay;
 mod veryimportantfile;
 mod patch_core {
@@ -44,6 +45,7 @@ mod patch_core {
 mod plugins;
 mod presets;
 mod rl_launch;
+mod recovery_tasks;
 mod runtime_assets;
 mod screen;
 mod spoofer;

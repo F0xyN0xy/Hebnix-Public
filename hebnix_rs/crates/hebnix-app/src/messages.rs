@@ -14,7 +14,9 @@ pub fn block_item_action_if_game_running(tx: &Sender<AppMsg>) -> bool {
 
 #[derive(Debug)]
 pub enum AppMsg {
+    NotificationFetched(crate::notifications::Notification),
     Log(String),
+    SpooferCertificateLost,
     RlApiCaptureReady(Result<(), String>),
     RlApiResponse(Result<Value, String>),
     ReplayUploadCaptureReady(Result<(), String>),
@@ -53,6 +55,7 @@ pub enum AppMsg {
         message: String,
     },
     BackgroundChangerDone(Result<String, String>),
+    MenuMapDone(Result<String, String>),
     BackgroundChangerProgress(String),
     WorkshopMultiplayerProgress(String),
     // result of spawning the tsnet sidecar and requesting the tailnet come up

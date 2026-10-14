@@ -188,3 +188,36 @@ pub fn find_rocket_league() -> Option<RlProcessInfo> {
     }
     None
 }
+
+/// pid of the first process whose exe name contains `name` (case-insensitive).
+pub fn find_process(name: &str) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let needle = name.to_ascii_lowercase();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut result = None;
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                let exe = String::from_utf16_lossy(&entry.szExeFile);
+                let exe = exe.trim_end_matches('\0').to_ascii_lowercase();
+                if exe.contains(&needle) {
+                    result = Some(entry.th32ProcessID);
+                    break;
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+        result
+    }
+}

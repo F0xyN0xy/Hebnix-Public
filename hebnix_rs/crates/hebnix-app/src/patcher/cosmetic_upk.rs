@@ -19,8 +19,12 @@ struct UpkInfo {
     name_offset: usize,
     export_count: usize,
     export_offset: usize,
+    import_count: usize,
+    import_offset: usize,
     package_guid_offset: usize,
+    generation_name_count_offset: Option<usize>,
     generation_size: i32,
+    last_block_size: usize,
     generation_size_offset: usize,
     compressed_chunk_info_offset: usize,
     compressed_chunk_info_offset_field: usize,
@@ -149,6 +153,9 @@ fn read_info(data: &[u8]) -> Result<UpkInfo, String> {
     let export_count = usize::try_from(read_i32(data, 33)?).map_err(|_| "Negative export count")?;
     let export_offset =
         usize::try_from(read_i32(data, 37)?).map_err(|_| "Negative export offset")?;
+    let import_count = usize::try_from(read_i32(data, 41)?).map_err(|_| "Negative import count")?;
+    let import_offset =
+        usize::try_from(read_i32(data, 45)?).map_err(|_| "Negative import offset")?;
     if name_offset < 12 || name_offset > data.len() {
         return Err(format!("UPK name offset {name_offset} is outside the file"));
     }
@@ -166,6 +173,23 @@ fn read_info(data: &[u8]) -> Result<UpkInfo, String> {
     }
     let package_guid_offset = summary.position;
     summary.skip(16)?;
+    let generations = usize::try_from(read_i32(data, summary.position)?)
+        .map_err(|_| "Negative UPK generation count")?;
+    let generation_name_count_offset = if generations == 0 {
+        None
+    } else {
+        Some(
+            summary
+                .position
+                .checked_add(8)
+                .and_then(|offset| {
+                    (generations - 1)
+                        .checked_mul(12)
+                        .and_then(|size| offset.checked_add(size))
+                })
+                .ok_or("UPK generation offset overflow")?,
+        )
+    };
     summary.array(12)?;
     for _ in 0..3 {
         summary.i32()?;
@@ -194,7 +218,8 @@ fn read_info(data: &[u8]) -> Result<UpkInfo, String> {
     let compressed_chunk_info_offset_field = summary.position;
     let compressed_chunk_info_offset =
         usize::try_from(summary.i32()?).map_err(|_| "Negative compressed chunk table offset")?;
-    summary.i32()?;
+    let last_block_size =
+        usize::try_from(summary.i32()?).map_err(|_| "Negative UPK last block size")?;
     let mut nonce = [0u8; 12];
     if licensee_version >= 33 {
         nonce.copy_from_slice(
@@ -218,15 +243,20 @@ fn read_info(data: &[u8]) -> Result<UpkInfo, String> {
         name_offset,
         export_count,
         export_offset,
+        import_count,
+        import_offset,
         package_guid_offset,
+        generation_name_count_offset,
         generation_size,
+        last_block_size,
         generation_size_offset,
         compressed_chunk_info_offset,
         compressed_chunk_info_offset_field,
     })
 }
 
-fn exported_name_indexes(data: &[u8], info: UpkInfo) -> Result<Vec<usize>, String> {
+fn exported_names(data: &[u8], info: UpkInfo) -> Result<Vec<(usize, usize, bool)>, String> {
+    let name_table = scan_names(data, info.name_count)?;
     let mut position = info
         .export_offset
         .checked_sub(info.name_offset)
@@ -238,7 +268,29 @@ fn exported_name_indexes(data: &[u8], info: UpkInfo) -> Result<Vec<usize>, Strin
         if object_name >= info.name_count {
             return Err(format!("Export {index} has an invalid object-name index"));
         }
-        names.push(object_name);
+        let class_index = read_i32(data, position)?;
+        let is_package = if class_index < 0 {
+            let import = usize::try_from(-i64::from(class_index) - 1)
+                .map_err(|_| "Invalid export class import")?;
+            if import >= info.import_count {
+                return Err(format!("Export {index} has an invalid class import"));
+            }
+            let import_start = info
+                .import_offset
+                .checked_sub(info.name_offset)
+                .ok_or("Import table precedes encrypted header")?;
+            let class_name = usize::try_from(read_i32(data, import_start + import * 28 + 20)?)
+                .map_err(|_| "Invalid export class name")?;
+            name_table
+                .get(class_name)
+                .ok_or("Invalid export class name")?
+                .name
+                .trim_end_matches('\0')
+                .eq_ignore_ascii_case("Package")
+        } else {
+            false
+        };
+        names.push((position + 12, object_name, is_package));
 
         // FObjectExport is variable length because it ends with an array of
         // net-object indices. This mirrors the UE3/C# package reader.
@@ -259,7 +311,13 @@ fn exported_name_indexes(data: &[u8], info: UpkInfo) -> Result<Vec<usize>, Strin
 
 fn encrypted_size(info: UpkInfo) -> Result<(usize, usize), String> {
     let plain = usize::try_from(
-        info.total_header_size as i64 - info.generation_size as i64 - info.name_offset as i64,
+        info.total_header_size as i64
+            - if info.package_flags & 0x0800 != 0 {
+                info.last_block_size as i64
+            } else {
+                info.generation_size as i64
+            }
+            - info.name_offset as i64,
     )
     .map_err(|_| "Invalid encrypted UPK header size")?;
     Ok((
@@ -270,6 +328,164 @@ fn encrypted_size(info: UpkInfo) -> Result<(usize, usize), String> {
             plain.div_ceil(16) * 16
         },
     ))
+}
+
+fn object_path(
+    data: &[u8],
+    info: UpkInfo,
+    exports: &[(usize, usize, bool)],
+    index: i32,
+) -> Result<String, String> {
+    let names = scan_names(data, info.name_count)?;
+    let mut current = index;
+    let mut parts = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    while current != 0 {
+        if !visited.insert(current) || visited.len() > 64 {
+            return Err("Cyclic or excessive UPK object hierarchy".into());
+        }
+        let name_field = if current > 0 {
+            exports
+                .get(current as usize - 1)
+                .ok_or("Invalid outer export")?
+                .0
+        } else {
+            let index =
+                usize::try_from(-i64::from(current) - 1).map_err(|_| "Invalid outer import")?;
+            if index >= info.import_count {
+                return Err("Invalid outer import".into());
+            }
+            info.import_offset - info.name_offset + index * 28 + 20
+        };
+        let name_index =
+            usize::try_from(read_i32(data, name_field)?).map_err(|_| "Negative object name")?;
+        let mut name = names
+            .get(name_index)
+            .ok_or("Invalid object name")?
+            .name
+            .clone();
+        let instance = read_i32(data, name_field + 4)?;
+        if instance > 0 {
+            name.push_str(&format!("_{}", instance - 1));
+        }
+        parts.push(name);
+        current = read_i32(data, name_field - 4)?;
+    }
+    parts.reverse();
+    Ok(parts.join("."))
+}
+
+fn declared_asset_paths(data: &[u8], info: UpkInfo) -> Result<Vec<String>, String> {
+    let names = scan_names(data, info.name_count)?;
+    let exports = exported_names(data, info)?;
+    let mut assets = Vec::new();
+    for (i, (field, _, _)) in exports.iter().enumerate() {
+        let class = read_i32(data, field - 12)?;
+        let class_name = if class < 0 {
+            let index =
+                usize::try_from(-i64::from(class) - 1).map_err(|_| "Invalid asset class")?;
+            if index >= info.import_count {
+                return Err("Invalid asset class import".into());
+            }
+            let at = info.import_offset - info.name_offset + index * 28 + 20;
+            usize::try_from(read_i32(data, at)?).map_err(|_| "Invalid asset class name")?
+        } else {
+            continue;
+        };
+        let name = names
+            .get(class_name)
+            .ok_or("Invalid asset class name")?
+            .name
+            .as_str();
+        if name.starts_with("ProductAsset_") || name.starts_with("ProductThumbnailAsset") {
+            assets.push(object_path(data, info, &exports, i as i32 + 1)?);
+        }
+    }
+    Ok(assets)
+}
+
+fn declared_asset_path(data: &[u8], info: UpkInfo) -> Result<Option<String>, String> {
+    let mut assets = declared_asset_paths(data, info)?;
+    Ok((assets.len() == 1).then(|| assets.remove(0)))
+}
+
+pub(crate) fn thumbnail_asset_path(
+    path: &Path,
+    base_dir: &Path,
+    main_asset: Option<&str>,
+) -> Result<String, String> {
+    let raw = fs::read(path).map_err(|e| e.to_string())?;
+    let info = read_info(&raw)?;
+    let (header, _, _) = find_key_and_decrypt(&raw, info, &keys(base_dir))?;
+    let assets = declared_asset_paths(&header, info)?;
+    if assets.len() == 1 {
+        return Ok(assets[0].clone());
+    }
+    if let Some(leaf) = main_asset.and_then(|asset| asset.rsplit('.').next()) {
+        let matching: Vec<_> = assets
+            .iter()
+            .filter(|asset| {
+                asset.rsplit('.').next().is_some_and(|name| {
+                    name.eq_ignore_ascii_case(&format!("{leaf}_T"))
+                        || name.eq_ignore_ascii_case(&format!("{leaf}_TThumbnail"))
+                })
+            })
+            .collect();
+        if matching.len() == 1 {
+            return Ok(matching[0].clone());
+        }
+    }
+    Err(format!(
+        "Could not uniquely resolve the item's thumbnail in {}",
+        path.display()
+    ))
+}
+
+fn align_asset_outer(
+    data: &mut [u8],
+    info: UpkInfo,
+    target_path: &str,
+    donor_index: Option<usize>,
+) -> Result<(), String> {
+    let (parent, leaf) = target_path
+        .rsplit_once('.')
+        .ok_or("Invalid target asset path")?;
+    let names = scan_names(data, info.name_count)?;
+    let exports = exported_names(data, info)?;
+    let matching: Vec<_> = exports
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, index, package))| {
+            !package
+                && names[*index].name.eq_ignore_ascii_case(leaf)
+                && donor_index.is_none_or(|donor| donor == *i)
+        })
+        .collect();
+    if matching.len() != 1 {
+        return Err(format!(
+            "Target asset '{target_path}' has {} matching exports (donor export {donor_index:?})",
+            matching.len()
+        ));
+    }
+    let (asset, (name_field, _, _)) = matching[0];
+    if object_path(data, info, &exports, asset as i32 + 1)?.eq_ignore_ascii_case(target_path) {
+        return Ok(());
+    }
+    let mut outer = None;
+    for (i, (_, _, is_package)) in exports.iter().enumerate() {
+        if *is_package
+            && object_path(data, info, &exports, i as i32 + 1)?.eq_ignore_ascii_case(parent)
+        {
+            if outer.is_some() {
+                return Err("Ambiguous target package group".into());
+            }
+            outer = Some(i as i32 + 1);
+        }
+    }
+    let outer = outer.ok_or_else(|| {
+        format!("Donor has no package group '{parent}'; this layout cannot be safely swapped")
+    })?;
+    write_i32(data, name_field - 4, outer)
 }
 
 fn crypt(data: &[u8], key: &[u8; 32], encrypt: bool) -> Result<Vec<u8>, String> {
@@ -353,32 +569,121 @@ fn find_key_and_decrypt(
 
 fn replace_name(
     data: Vec<u8>,
-    old: &str,
+    index: usize,
     new: &str,
     count: usize,
 ) -> Result<(Vec<u8>, i32), String> {
-    let Some(entry) = scan_names(&data, count)?
-        .into_iter()
-        .find(|entry| entry.name.trim_end_matches('\0').eq_ignore_ascii_case(old))
-    else {
-        return Ok((data, 0));
-    };
+    let entry = scan_names(&data, count)?
+        .get(index)
+        .cloned()
+        .ok_or("Invalid replacement name index")?;
     let mut replacement = new.as_bytes().to_vec();
     replacement.push(0);
-    if replacement.len() <= entry.len {
+    if replacement.len() == entry.len {
         let mut output = data;
-        output[entry.offset + 4..entry.offset + 4 + entry.len].fill(0);
         output[entry.offset + 4..entry.offset + 4 + replacement.len()]
             .copy_from_slice(&replacement);
         return Ok((output, 0));
     }
-    let delta = replacement.len() - entry.len;
-    let mut output = Vec::with_capacity(data.len() + delta);
+    let delta = i32::try_from(replacement.len()).map_err(|_| "UPK name is too long")?
+        - i32::try_from(entry.len).map_err(|_| "UPK name is too long")?;
+    let mut output = Vec::new();
     output.extend_from_slice(&data[..entry.offset]);
     output.extend_from_slice(&(replacement.len() as i32).to_le_bytes());
     output.extend_from_slice(&replacement);
     output.extend_from_slice(&data[entry.offset + 4 + entry.len..]);
-    Ok((output, delta as i32))
+    Ok((output, delta))
+}
+
+/// Plan against the original table so renames cannot consume one another.
+/// A package and its asset can share an FName slot in the donor but require
+/// distinct names in the target. Split that slot and redirect the asset exports,
+/// leaving package references and all existing name indexes intact.
+fn rename_identities(
+    mut data: Vec<u8>,
+    info: UpkInfo,
+    pairs: &[(String, String)],
+    donor_export_name: Option<&str>,
+    target_export_name: &str,
+) -> Result<(Vec<u8>, i32, usize), String> {
+    let original = scan_names(&data, info.name_count)?;
+    let exports = exported_names(&data, info)?;
+    let replacements: Vec<Option<&str>> = original
+        .iter()
+        .map(|entry| {
+            pairs.iter().find_map(|(old, new)| {
+                entry
+                    .name
+                    .trim_end_matches('\0')
+                    .eq_ignore_ascii_case(old)
+                    .then_some(new.as_str())
+            })
+        })
+        .collect();
+    let mut alias = None;
+    if let Some(donor_name) = donor_export_name {
+        let matching: Vec<_> = exports
+            .iter()
+            .filter(|(_, index, is_package)| {
+                !is_package
+                    && original[*index]
+                        .name
+                        .trim_end_matches('\0')
+                        .eq_ignore_ascii_case(donor_name)
+            })
+            .collect();
+        if matching.is_empty() {
+            return Err(format!(
+                "Donor UPK does not export source object '{donor_name}'"
+            ));
+        }
+        for (offset, index, _) in matching {
+            let renamed =
+                replacements[*index].unwrap_or(original[*index].name.trim_end_matches('\0'));
+            if renamed != target_export_name {
+                write_i32(
+                    &mut data,
+                    *offset,
+                    i32::try_from(info.name_count).map_err(|_| "Too many UPK names")?,
+                )?;
+                let entry = &original[*index];
+                alias = Some(
+                    data[entry.offset + 4 + entry.len..entry.offset + 4 + entry.len + 8].to_vec(),
+                );
+            }
+        }
+    }
+    let mut total_delta = 0i32;
+    for (index, replacement) in replacements.iter().enumerate() {
+        if let Some(new) = replacement {
+            let (renamed, delta) = replace_name(data, index, new, info.name_count)?;
+            data = renamed;
+            total_delta = total_delta
+                .checked_add(delta)
+                .ok_or("UPK name table growth overflow")?;
+        }
+    }
+    let mut count = info.name_count;
+    if let Some(flags) = alias {
+        let names = scan_names(&data, count)?;
+        let last = names.last().ok_or("UPK has no names")?;
+        let end = last.offset + 4 + last.len + 8;
+        let mut entry = Vec::new();
+        entry.extend_from_slice(
+            &i32::try_from(target_export_name.len() + 1)
+                .map_err(|_| "UPK object name is too long")?
+                .to_le_bytes(),
+        );
+        entry.extend_from_slice(target_export_name.as_bytes());
+        entry.push(0);
+        entry.extend_from_slice(&flags);
+        total_delta = total_delta
+            .checked_add(i32::try_from(entry.len()).map_err(|_| "UPK name entry is too large")?)
+            .ok_or("UPK name table growth overflow")?;
+        data.splice(end..end, entry);
+        count += 1;
+    }
+    Ok((data, total_delta, count))
 }
 
 fn apply_deltas(
@@ -417,7 +722,32 @@ fn apply_deltas(
         i32::try_from(info.generation_size as i64 + alignment_delta - delta as i64)
             .map_err(|_| "Generation size overflow")?,
     )?;
-    if alignment_delta != 0 {
+    // The compression reader's plaintext boundary moves with the name table.
+    // Leaving virtual chunk/export addresses unchanged makes the engine decrypt
+    // the first `delta` bytes of object data again (or read header bytes as data).
+    let updated = UpkInfo {
+        name_count: usize::try_from(read_i32(raw, 25)?).map_err(|_| "Negative name count")?,
+        export_offset: usize::try_from(info.export_offset as i64 + i64::from(delta))
+            .map_err(|_| "Export table offset became negative")?,
+        import_offset: usize::try_from(info.import_offset as i64 + i64::from(delta))
+            .map_err(|_| "Import table offset became negative")?,
+        ..info
+    };
+    for (name_field, _, _) in exported_names(decrypted, updated)? {
+        let serial_field = name_field + 24;
+        let serial_size = read_i32(decrypted, name_field + 20)?;
+        if serial_size > 0 {
+            let old = read_i64(decrypted, serial_field)?;
+            let new = old
+                .checked_add(i64::from(delta))
+                .ok_or("Export offset overflow")?;
+            if new < 0 {
+                return Err("Export offset became negative".into());
+            }
+            write_i64(decrypted, serial_field, new)?;
+        }
+    }
+    {
         let table = usize::try_from(info.compressed_chunk_info_offset as i64 + delta as i64)
             .map_err(|_| "Chunk table offset became negative")?;
         let count = usize::try_from(read_i32(decrypted, table)?)
@@ -425,6 +755,14 @@ fn apply_deltas(
         let stride = chunk_table_stride(decrypted, table, count, info.licensee_version)?;
         let mut row = table + 4;
         for _ in 0..count {
+            let logical = read_i64(decrypted, row)?;
+            write_i64(
+                decrypted,
+                row,
+                logical
+                    .checked_add(i64::from(delta))
+                    .ok_or("Logical chunk offset overflow")?,
+            )?;
             let old = i64::from_le_bytes(
                 decrypted
                     .get(row + 12..row + 20)
@@ -445,6 +783,76 @@ fn apply_deltas(
     Ok(())
 }
 
+// Texture mip offsets can refer to a shared .tfc or to this package. Only local
+// offsets move with the virtual data region; pixels and external offsets stay put.
+fn rebase_texture_bulk(source: &Path, delta: i32) -> Result<Option<Vec<u8>>, String> {
+    use crate::patcher::upk_package::{UpkPackage, strip};
+    let mut package = UpkPackage::load(source)?;
+    let mut patches = Vec::new();
+    for export in &package.exports {
+        if strip(&package.class_of(export)) != "Texture2D" {
+            continue;
+        }
+        let (_, native) = package.serialized_props(export)?;
+        let serial =
+            &package.image[export.serial_offset..export.serial_offset + export.serial_size];
+        let mut at = native;
+        let mut record = |at: &mut usize| -> Result<(), String> {
+            let flags = read_i32(serial, *at)? as u32;
+            let count = read_i32(serial, *at + 4)?;
+            let stored = read_i32(serial, *at + 8)?;
+            *at += 12;
+            let size = if flags & 32 != 0 && count == 0 && stored == -1 {
+                0
+            } else {
+                usize::try_from(stored).map_err(|_| "Negative texture bulk size")?
+            };
+            if flags & 0x10000 == 0 || flags & 1 != 0 {
+                let old = read_i64(serial, *at)?;
+                if flags & (1 | 32) == 0 && size > 0 {
+                    // Current cooked inline records must point to their own bytes.
+                    if old != (export.serial_offset + *at + 8) as i64 {
+                        return Err("Unsupported out-of-line local texture bulk data".into());
+                    }
+                    patches.push((
+                        export.serial_offset + *at,
+                        old.checked_add(i64::from(delta))
+                            .ok_or("Texture bulk offset overflow")?,
+                    ));
+                }
+                *at += 8;
+            }
+            if flags & (1 | 32) == 0 {
+                *at = at.checked_add(size).ok_or("Texture bulk size overflow")?;
+            }
+            if *at > serial.len() {
+                return Err("Truncated texture bulk data".into());
+            }
+            Ok(())
+        };
+        record(&mut at)?;
+        let mips = read_i32(serial, at)?;
+        at += 4;
+        if !(0..=32).contains(&mips) {
+            return Err("Unsupported texture mip layout".into());
+        }
+        for _ in 0..mips {
+            record(&mut at)?;
+            at = at.checked_add(8).ok_or("Texture dimensions overflow")?;
+            if at > serial.len() {
+                return Err("Truncated texture mip dimensions".into());
+            }
+        }
+    }
+    if patches.is_empty() {
+        return Ok(None);
+    }
+    for (offset, value) in patches {
+        package.patch(offset, &value.to_le_bytes())?;
+    }
+    package.repacked().map(Some)
+}
+
 fn infer_explosion_pairs(
     donor_upk: &str,
     donor_asset: &str,
@@ -459,18 +867,18 @@ fn infer_explosion_pairs(
         .collect();
     let mut pairs = Vec::new();
     let mut seen = Vec::<String>::new();
-    for index in 0..donor.len().min(target.len()) {
+    for index in 0..donor.len() {
         let old = donor[index];
-        let new = target[index];
+        let new = if index + 1 == donor.len() {
+            target.last().copied()
+        } else {
+            target.get(index).copied()
+        };
+        let Some(new) = new else { continue };
         let important = index == 0
             || index + 1 == donor.len()
             || target_lower.contains(&old.to_ascii_lowercase());
-        if important
-            && !old.is_empty()
-            && !new.is_empty()
-            && old != new
-            && !seen.iter().any(|x| x == old)
-        {
+        if important && !old.is_empty() && !new.is_empty() {
             seen.push(old.to_string());
             pairs.push((old.to_string(), new.to_string()));
         }
@@ -507,6 +915,7 @@ fn validate_output(
     target_export_name: &str,
     target_guid: &[u8; 16],
     alternative_targets: &[String],
+    target_asset_path: Option<&str>,
 ) -> Result<(), String> {
     let info = read_info(output)?;
     if output.get(info.package_guid_offset..info.package_guid_offset + 16)
@@ -520,7 +929,7 @@ fn validate_output(
         .ok_or("Generated UPK encrypted header is truncated")?;
     let decrypted = crypt_for_info(encrypted, target_key, false, info)?;
     let names = scan_names(&decrypted, info.name_count)?;
-    let export_names = exported_name_indexes(&decrypted, info)?;
+    let export_names = exported_names(&decrypted, info)?;
     let has_target_name = names
         .iter()
         .any(|entry| entry.name.trim_end_matches('\0') == target_name);
@@ -549,14 +958,32 @@ fn validate_output(
             "Generated UPK does not contain target package name '{target_short}'"
         ));
     }
-    if !export_names.iter().any(|index| {
-        names
-            .get(*index)
-            .is_some_and(|entry| entry.name.trim_end_matches('\0') == target_export_name)
+    if !export_names.iter().any(|(_, index, is_package)| {
+        !is_package
+            && names
+                .get(*index)
+                .is_some_and(|entry| entry.name.trim_end_matches('\0') == target_export_name)
     }) {
         return Err(format!(
             "Generated UPK does not export target object '{target_export_name}'"
         ));
+    }
+    if let Some(path) = target_asset_path {
+        let mut found = false;
+        for (i, (_, _, package)) in export_names.iter().enumerate() {
+            if !package
+                && object_path(&decrypted, info, &export_names, i as i32 + 1)?
+                    .eq_ignore_ascii_case(path)
+            {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!(
+                "Generated UPK does not export full target path '{path}'"
+            ));
+        }
     }
 
     let chunk_count = usize::try_from(read_i32(&decrypted, info.compressed_chunk_info_offset)?)
@@ -565,6 +992,19 @@ fn validate_output(
         return Err("Generated UPK has an invalid compressed-chunk count".into());
     }
     let mut row = info.compressed_chunk_info_offset + 4;
+    let logical_start = read_i64(&decrypted, row)?;
+    if logical_start != (info.name_offset + info.compressed_chunk_info_offset) as i64
+        || logical_start != i64::from(read_i32(output, 49)?)
+    {
+        return Err("Generated UPK header overlaps or leaves a gap before object data".into());
+    }
+    for (name_field, _, _) in &export_names {
+        if read_i32(&decrypted, name_field + 20)? > 0
+            && read_i64(&decrypted, name_field + 24)? < logical_start
+        {
+            return Err("Generated UPK export points into its header".into());
+        }
+    }
     let stride = chunk_table_stride(
         &decrypted,
         info.compressed_chunk_info_offset,
@@ -627,16 +1067,34 @@ pub fn patch_for_target(
 ) -> Result<(), String> {
     let mut raw = fs::read(source).map_err(|error| format!("{}: {error}", source.display()))?;
     let info = read_info(&raw)?;
+    if info.licensee_version < 22 {
+        return Err(
+            "Cosmetic swaps require the current 64-bit Rocket League package layout".into(),
+        );
+    }
     let candidates = keys(base_dir);
     let (mut decrypted, source_key, old_encrypted_size) =
         find_key_and_decrypt(&raw, info, &candidates)?;
     let target_raw =
         fs::read(target_backup).map_err(|error| format!("{}: {error}", target_backup.display()))?;
     let target_info = read_info(&target_raw)?;
-    let target_key = find_key_and_decrypt(&target_raw, target_info, &candidates)
-        .ok()
-        .map(|(_, key, _)| key)
-        .unwrap_or(source_key);
+    let (target_decrypted, target_key, _) =
+        find_key_and_decrypt(&target_raw, target_info, &candidates)
+            .map_err(|error| format!("Cannot verify pristine target UPK: {error}"))?;
+    // Thumbnail filenames need not match their ProductThumbnailAsset export.
+    // Missing catalog paths are resolved from the actual package declaration.
+    let inferred_donor = if donor_asset_path.is_none() {
+        declared_asset_path(&decrypted, info)?
+    } else {
+        None
+    };
+    let inferred_target = if target_asset_path.is_none() {
+        declared_asset_path(&target_decrypted, target_info)?
+    } else {
+        None
+    };
+    let donor_asset_path = donor_asset_path.or(inferred_donor.as_deref());
+    let target_asset_path = target_asset_path.or(inferred_target.as_deref());
     let target_guid: [u8; 16] = target_raw
         .get(target_info.package_guid_offset..target_info.package_guid_offset + 16)
         .ok_or("Target UPK package GUID is truncated")?
@@ -671,7 +1129,6 @@ pub fn patch_for_target(
             "The donor package identity '{source_name}' was not found in its UPK name table"
         ));
     }
-    let mut total_delta = 0i32;
     let alternative_targets: Vec<String> =
         if donor_asset_path.is_some() && target_asset_path.is_some() {
             pairs.iter().map(|(_, new)| new.clone()).collect()
@@ -683,14 +1140,62 @@ pub fn patch_for_target(
         .and_then(|asset| asset.split('.').next_back())
         .filter(|name| !name.is_empty())
         .unwrap_or(target_short);
-    for (old, new) in pairs {
-        let (new_data, delta) = replace_name(decrypted, &old, &new, info.name_count)?;
-        decrypted = new_data;
-        total_delta = total_delta
-            .checked_add(delta)
-            .ok_or("UPK name table growth overflow")?;
+    let donor_export_name = donor_asset_path
+        .and_then(|asset| asset.split('.').next_back())
+        .filter(|name| !name.is_empty());
+    let donor_index = if let Some(path) = donor_asset_path {
+        let exports = exported_names(&decrypted, info)?;
+        let mut matches = Vec::new();
+        for (i, (_, _, package)) in exports.iter().enumerate() {
+            if !package
+                && object_path(&decrypted, info, &exports, i as i32 + 1)?.eq_ignore_ascii_case(path)
+            {
+                matches.push(i);
+            }
+        }
+        if matches.len() != 1 {
+            return Err(format!("Donor UPK does not uniquely export '{path}'"));
+        }
+        Some(matches[0])
+    } else {
+        None
+    };
+    let (mut new_data, total_delta, name_count) = rename_identities(
+        decrypted,
+        info,
+        &pairs,
+        donor_export_name,
+        target_export_name,
+    )?;
+    if total_delta != 0 {
+        if let Some(rebased) = rebase_texture_bulk(source, total_delta)? {
+            raw = rebased;
+            raw[info.package_guid_offset..info.package_guid_offset + 16]
+                .copy_from_slice(&target_guid);
+            let (header, _, _) = find_key_and_decrypt(&raw, info, &candidates)?;
+            new_data =
+                rename_identities(header, info, &pairs, donor_export_name, target_export_name)?.0;
+        }
+    }
+    decrypted = new_data;
+    write_i32(
+        &mut raw,
+        25,
+        i32::try_from(name_count).map_err(|_| "Too many UPK names")?,
+    )?;
+    if name_count != info.name_count {
+        if let Some(offset) = info.generation_name_count_offset {
+            write_i32(
+                &mut raw,
+                offset,
+                i32::try_from(name_count).map_err(|_| "Too many UPK names")?,
+            )?;
+        }
     }
     apply_deltas(&mut raw, &mut decrypted, info, total_delta)?;
+    if let Some(path) = target_asset_path {
+        align_asset_outer(&mut decrypted, read_info(&raw)?, path, donor_index)?;
+    }
     let (old_plain, _) = encrypted_size(info)?;
     let new_plain = usize::try_from(old_plain as i64 + total_delta as i64)
         .map_err(|_| "Renamed UPK header became negative")?;
@@ -754,6 +1259,7 @@ pub fn patch_for_target(
         target_export_name,
         &target_guid,
         &alternative_targets,
+        target_asset_path,
     )?;
 
     let temp_name = format!(
@@ -776,6 +1282,7 @@ pub fn patch_for_target(
         target_export_name,
         &target_guid,
         &alternative_targets,
+        target_asset_path,
     ) {
         let _ = fs::remove_file(&temp_path);
         return Err(error);
@@ -784,4 +1291,234 @@ pub fn patch_for_target(
         .map_err(|error| format!("Failed to install {}: {error}", destination.display()));
     let _ = fs::remove_file(&temp_path);
     result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (Vec<u8>, UpkInfo) {
+        let mut data = Vec::new();
+        for name in ["Shared", "Package", "AssetClass"] {
+            data.extend_from_slice(&((name.len() + 1) as i32).to_le_bytes());
+            data.extend_from_slice(name.as_bytes());
+            data.push(0);
+            data.extend_from_slice(&[0; 8]);
+        }
+        let export_offset = data.len();
+        data.resize(export_offset + 144, 0);
+        write_i32(&mut data, export_offset, -1).unwrap();
+        write_i32(&mut data, export_offset + 72, -2).unwrap();
+        let import_offset = data.len();
+        data.resize(import_offset + 56, 0);
+        write_i32(&mut data, import_offset + 20, 1).unwrap();
+        write_i32(&mut data, import_offset + 48, 2).unwrap();
+        let info = UpkInfo {
+            licensee_version: 22,
+            package_flags: 0,
+            nonce: [0; 12],
+            total_header_size: data.len(),
+            name_count: 3,
+            name_offset: 0,
+            export_count: 2,
+            export_offset,
+            import_count: 2,
+            import_offset,
+            package_guid_offset: 0,
+            generation_name_count_offset: None,
+            generation_size: 0,
+            last_block_size: 0,
+            generation_size_offset: 0,
+            compressed_chunk_info_offset: 0,
+            compressed_chunk_info_offset_field: 0,
+        };
+        (data, info)
+    }
+
+    #[test]
+    fn shared_package_and_asset_get_distinct_names() {
+        let (data, info) = fixture();
+        let old_size = data.len();
+        let pairs = vec![
+            ("Shared".into(), "TargetPackage".into()),
+            ("Shared".into(), "TargetAsset".into()),
+        ];
+        let (renamed, delta, count) =
+            rename_identities(data, info, &pairs, Some("Shared"), "TargetAsset").unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(renamed.len() as i32 - old_size as i32, delta);
+        let updated = UpkInfo {
+            name_count: count,
+            export_offset: (info.export_offset as i32 + delta) as usize,
+            import_offset: (info.import_offset as i32 + delta) as usize,
+            ..info
+        };
+        let names = scan_names(&renamed, count).unwrap();
+        let exports = exported_names(&renamed, updated).unwrap();
+        assert_eq!(names[exports[0].1].name, "TargetPackage");
+        assert!(exports[0].2);
+        assert_eq!(names[exports[1].1].name, "TargetAsset");
+        assert!(!exports[1].2);
+    }
+
+    #[test]
+    fn replacements_do_not_cascade_or_leave_padded_names() {
+        let (data, info) = fixture();
+        let pairs = vec![
+            ("Shared".into(), "Package".into()),
+            ("Package".into(), "X".into()),
+        ];
+        let (renamed, _, count) = rename_identities(data, info, &pairs, None, "unused").unwrap();
+        let names = scan_names(&renamed, count).unwrap();
+        assert_eq!(names[0].name, "Package");
+        assert_eq!(names[1].name, "X");
+        assert_eq!(names[1].len, 2);
+    }
+
+    #[test]
+    fn differing_path_depths_still_map_the_leaf_object() {
+        let pairs = infer_explosion_pairs(
+            "Shared_SF",
+            "Shared.Shared",
+            "Target_SF",
+            "Target.Group.Asset",
+        );
+        assert!(pairs.contains(&("Shared".into(), "Target".into())));
+        assert!(pairs.contains(&("Shared".into(), "Asset".into())));
+        let pairs = infer_explosion_pairs(
+            "Source_SF",
+            "Source.Group.SourceAsset",
+            "Target_SF",
+            "Target.TargetAsset",
+        );
+        assert!(pairs.contains(&("SourceAsset".into(), "TargetAsset".into())));
+    }
+
+    #[test]
+    fn unchanged_package_name_is_preserved_when_asset_name_changes() {
+        let (data, info) = fixture();
+        let pairs = infer_explosion_pairs(
+            "Shared_SF",
+            "Shared.Shared",
+            "Other_SF",
+            "Shared.OtherAsset",
+        );
+        let (renamed, _, count) =
+            rename_identities(data, info, &pairs, Some("Shared"), "OtherAsset").unwrap();
+        let names = scan_names(&renamed, count).unwrap();
+        assert_eq!(names[0].name, "Shared");
+        assert_eq!(names[3].name, "OtherAsset");
+    }
+
+    #[test]
+    fn name_growth_and_shrink_rebase_virtual_offsets_independently_of_aes_alignment() {
+        for delta in [-5, -1, 1, 8, 16, 37] {
+            let (mut data, mut info) = fixture();
+            let table = data.len();
+            data.resize(table + 4 + 2 * 24, 0);
+            info.name_offset = 128;
+            info.export_offset += info.name_offset;
+            info.import_offset += info.name_offset;
+            info.compressed_chunk_info_offset = table;
+            info.compressed_chunk_info_offset_field = 104;
+            info.generation_size_offset = 100;
+            info.generation_size = 1000;
+            info.total_header_size = info.name_offset + data.len() + 1000;
+            let logical = (info.name_offset + table) as i64;
+            let export = info.export_offset - info.name_offset + 72;
+            write_i32(&mut data, export + 32, 12).unwrap();
+            write_i64(&mut data, export + 36, logical).unwrap();
+            write_i32(&mut data, table, 2).unwrap();
+            for i in 0..2 {
+                let row = table + 4 + i * 24;
+                write_i64(&mut data, row, logical + i as i64 * 1000).unwrap();
+                write_i32(&mut data, row + 8, 1000).unwrap();
+                write_i64(
+                    &mut data,
+                    row + 12,
+                    info.total_header_size as i64 + i as i64 * 100,
+                )
+                .unwrap();
+                write_i32(&mut data, row + 20, 100).unwrap();
+            }
+            let (renamed, actual_delta) =
+                replace_name(data, 0, &"S".repeat((6 + delta) as usize), info.name_count).unwrap();
+            data = renamed;
+            assert_eq!(actual_delta, delta);
+            let mut raw = vec![0; 128];
+            write_i32(&mut raw, 25, info.name_count as i32).unwrap();
+            for (field, value) in [
+                (37, info.export_offset),
+                (45, info.import_offset),
+                (49, logical as usize),
+                (53, logical as usize),
+            ] {
+                write_i32(&mut raw, field, value as i32).unwrap();
+            }
+            let (_, old_aligned) = encrypted_size(info).unwrap();
+            apply_deltas(&mut raw, &mut data, info, delta).unwrap();
+            let row = (table as i32 + delta) as usize + 4;
+            assert_eq!(read_i64(&data, row).unwrap(), logical + i64::from(delta));
+            assert_eq!(
+                read_i64(&data, (export as i32 + delta) as usize + 36).unwrap(),
+                logical + i64::from(delta)
+            );
+            let new_aligned = (encrypted_size(info).unwrap().0 as i64 + i64::from(delta)) as usize;
+            let physical_delta = (new_aligned.div_ceil(16) * 16) as i64 - old_aligned as i64;
+            assert_eq!(
+                read_i64(&data, row + 12).unwrap(),
+                info.total_header_size as i64 + physical_delta
+            );
+        }
+    }
+
+    #[test]
+    fn ctr_header_uses_last_block_size_instead_of_ecb_garbage_size() {
+        let (_, mut info) = fixture();
+        info.package_flags = 0x0800;
+        info.total_header_size = 400;
+        info.name_offset = 128;
+        info.generation_size = 123;
+        info.last_block_size = 12;
+        assert_eq!(encrypted_size(info).unwrap(), (260, 260));
+    }
+
+    #[test]
+    fn asset_outer_is_aligned_to_the_full_target_path() {
+        let (mut data, info) = fixture();
+        align_asset_outer(&mut data, info, "Shared.Shared", Some(1)).unwrap();
+        let exports = exported_names(&data, info).unwrap();
+        assert_eq!(
+            object_path(&data, info, &exports, 2).unwrap(),
+            "Shared.Shared"
+        );
+        assert_eq!(read_i32(&data, info.export_offset + 72 + 8).unwrap(), 1);
+        let before = data.clone();
+        assert!(align_asset_outer(&mut data, info, "Shared.Missing.Shared", Some(1)).is_err());
+        assert_eq!(data, before);
+    }
+
+    #[test]
+    fn thumbnail_identity_is_read_from_its_declaration() {
+        let (data, info) = fixture();
+        let (mut data, delta) =
+            replace_name(data, 2, "ProductThumbnailAsset_TA", info.name_count).unwrap();
+        let info = UpkInfo {
+            export_offset: (info.export_offset as i32 + delta) as usize,
+            import_offset: (info.import_offset as i32 + delta) as usize,
+            ..info
+        };
+        write_i32(&mut data, info.export_offset + 72 + 8, 1).unwrap();
+        assert_eq!(
+            declared_asset_path(&data, info).unwrap().as_deref(),
+            Some("Shared.Shared")
+        );
+    }
+
+    #[test]
+    fn cyclic_outer_references_are_rejected() {
+        let (mut data, info) = fixture();
+        write_i32(&mut data, info.export_offset + 8, 1).unwrap();
+        assert!(object_path(&data, info, &exported_names(&data, info).unwrap(), 1).is_err());
+    }
 }
