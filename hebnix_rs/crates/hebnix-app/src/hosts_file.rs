@@ -12,10 +12,20 @@ pub fn hosts_path() -> PathBuf {
 }
 
 pub fn is_writable() -> bool {
+    // create, some debloat tools delete the hosts file entirely
     std::fs::OpenOptions::new()
         .append(true)
+        .create(true)
         .open(hosts_path())
         .is_ok()
+}
+
+// a missing hosts file is just an empty one, windows works fine without it
+fn read(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        other => other,
+    }
 }
 
 fn line_for(host: &str) -> String {
@@ -26,8 +36,7 @@ fn line_for(host: &str) -> String {
 /// untouched when it already has the desired entries.
 pub fn set_redirects(hosts: &[&str]) -> Result<(), String> {
     let path = hosts_path();
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("cant read the hosts file: {e}"))?;
+    let content = read(&path).map_err(|e| format!("cant read the hosts file: {e}"))?;
     if redirects_match(&content, hosts) {
         return Ok(());
     }
@@ -55,7 +64,7 @@ fn redirects_match(content: &str, hosts: &[&str]) -> bool {
 }
 
 pub fn has_redirects() -> bool {
-    std::fs::read_to_string(hosts_path())
+    read(&hosts_path())
         .map(|content| content.lines().any(is_ours))
         .unwrap_or(false)
 }
@@ -63,8 +72,7 @@ pub fn has_redirects() -> bool {
 /// drops our lines, whatever host they were for
 pub fn clear() -> Result<(), String> {
     let path = hosts_path();
-    let content =
-        std::fs::read_to_string(&path).map_err(|e| format!("cant read the hosts file: {e}"))?;
+    let content = read(&path).map_err(|e| format!("cant read the hosts file: {e}"))?;
 
     if !content.lines().any(is_ours) {
         return Ok(());
