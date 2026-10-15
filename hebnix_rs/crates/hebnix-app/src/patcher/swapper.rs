@@ -404,7 +404,7 @@ pub struct SwapperState {
     resolution_generation: u64,
     swap_paint: HashMap<String, SwapPaint>,
     swap_speed: HashMap<String, f32>,
-    /// set from the Experimental tab; shows the speed picker on swap rows
+    /// set from the Items animation speed tab; shows the speed picker on swap rows
     pub speed_enabled: bool,
 }
 

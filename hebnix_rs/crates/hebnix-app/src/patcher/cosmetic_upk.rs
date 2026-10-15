@@ -375,7 +375,7 @@ fn object_path(
     Ok(parts.join("."))
 }
 
-fn declared_asset_paths(data: &[u8], info: UpkInfo) -> Result<Vec<String>, String> {
+fn declared_asset_exports(data: &[u8], info: UpkInfo) -> Result<Vec<(usize, String)>, String> {
     let names = scan_names(data, info.name_count)?;
     let exports = exported_names(data, info)?;
     let mut assets = Vec::new();
@@ -398,10 +398,17 @@ fn declared_asset_paths(data: &[u8], info: UpkInfo) -> Result<Vec<String>, Strin
             .name
             .as_str();
         if name.starts_with("ProductAsset_") || name.starts_with("ProductThumbnailAsset") {
-            assets.push(object_path(data, info, &exports, i as i32 + 1)?);
+            assets.push((i, object_path(data, info, &exports, i as i32 + 1)?));
         }
     }
     Ok(assets)
+}
+
+fn declared_asset_paths(data: &[u8], info: UpkInfo) -> Result<Vec<String>, String> {
+    Ok(declared_asset_exports(data, info)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect())
 }
 
 fn declared_asset_path(data: &[u8], info: UpkInfo) -> Result<Option<String>, String> {
@@ -1057,6 +1064,100 @@ fn validate_output(
     Ok(())
 }
 
+/// Append property names while preserving every existing FName index. Uses the
+/// same header/chunk and local texture-offset rebasing as cosmetic identities.
+pub(crate) fn append_names(
+    source: &Path,
+    destination: &Path,
+    additions: &[&str],
+) -> Result<(), String> {
+    use crate::patcher::upk_package::{UpkPackage, strip};
+    let original = UpkPackage::load(source)?;
+    let mut raw = fs::read(source).map_err(|e| e.to_string())?;
+    let info = read_info(&raw)?;
+    if info.licensee_version < 22 {
+        return Err("Paint properties require the current Rocket League package layout".into());
+    }
+    let candidates = keys(source.parent().unwrap_or(Path::new(".")));
+    let (mut decrypted, key, old_encrypted_size) = find_key_and_decrypt(&raw, info, &candidates)?;
+    let entries = scan_names(&decrypted, info.name_count)?;
+    let last = entries.last().ok_or("Empty UPK name table")?;
+    let at = last.offset + 4 + last.len + 8;
+    let mut added = Vec::new();
+    let mut wanted = std::collections::HashSet::new();
+    for name in additions {
+        if !wanted.insert(*name) || entries.iter().any(|e| e.name == *name) {
+            continue;
+        }
+        if name.is_empty() || !name.is_ascii() || name.len() > 500 || name.contains('\0') {
+            return Err("Invalid appended UPK name".into());
+        }
+        added.extend(((name.len() + 1) as i32).to_le_bytes());
+        added.extend(name.as_bytes());
+        added.push(0);
+        added.extend([0u8; 8]);
+    }
+    let extra_count = additions
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .iter()
+        .filter(|name| !entries.iter().any(|e| e.name == **name))
+        .count();
+    if extra_count == 0 {
+        fs::copy(source, destination).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let delta = i32::try_from(added.len()).map_err(|_| "Appended names too large")?;
+    if let Some(rebased) = rebase_texture_bulk(source, delta)? {
+        raw = rebased;
+        decrypted = find_key_and_decrypt(&raw, info, &candidates)?.0;
+    }
+    decrypted.splice(at..at, added);
+    let count = i32::try_from(info.name_count + extra_count).map_err(|_| "Too many UPK names")?;
+    write_i32(&mut raw, 25, count)?;
+    if let Some(at) = info.generation_name_count_offset {
+        write_i32(&mut raw, at, count)?;
+    }
+    apply_deltas(&mut raw, &mut decrypted, info, delta)?;
+    let (plain, _) = encrypted_size(info)?;
+    let new_plain = plain + delta as usize;
+    let size = if info.package_flags & 0x0800 != 0 {
+        new_plain
+    } else {
+        new_plain.div_ceil(16) * 16
+    };
+    decrypted.resize(size, 0);
+    let encrypted = crypt_for_info(&decrypted[..size], &key, true, info)?;
+    let mut output = raw[..info.name_offset].to_vec();
+    output.extend(encrypted);
+    output.extend_from_slice(&raw[info.name_offset + old_encrypted_size..]);
+    fs::write(destination, output).map_err(|e| e.to_string())?;
+    let check = UpkPackage::load(destination)?;
+    if check.exports.len() != original.exports.len()
+        || check.names[..original.names.len()] != original.names
+    {
+        return Err("Paint name-table verification failed".into());
+    }
+    for (before, after) in original.exports.iter().zip(&check.exports) {
+        if before.serial_size != after.serial_size
+            || (before.serial_size > 0
+                && after.serial_offset != before.serial_offset + delta as usize)
+        {
+            return Err("Paint name-table export relocation failed".into());
+        }
+        if !matches!(
+            strip(&original.class_of(before)),
+            "Texture2D" | "TextureCube"
+        ) && original.image[before.serial_offset..before.serial_offset + before.serial_size]
+            != check.image[after.serial_offset..after.serial_offset + after.serial_size]
+        {
+            return Err("Paint name-table changed an unrelated export".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn patch_for_target(
     source: &Path,
     target_backup: &Path,
@@ -1152,6 +1253,12 @@ pub fn patch_for_target(
             {
                 matches.push(i);
             }
+        }
+        if matches.len() > 1 {
+            // Cooked wheels can have a mesh and ProductAsset with the same
+            // object path. The requested item identity belongs to ProductAsset.
+            let products = declared_asset_exports(&decrypted, info)?;
+            matches.retain(|i| products.iter().any(|(index, _)| index == i));
         }
         if matches.len() != 1 {
             return Err(format!("Donor UPK does not uniquely export '{path}'"));

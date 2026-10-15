@@ -161,6 +161,11 @@ pub struct SpeedPatchCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplayUploadCfg {
+    #[serde(default = "legacy_replay_upload_enabled")]
+    pub upload_enabled: bool,
+    pub save_locally: bool,
+    /// Empty uses the Steam/Epic replay directory detected for this installation.
+    pub save_directory: String,
     pub provider: String,
     pub api_key: String,
     #[serde(default = "default_replay_naming_template")]
@@ -170,6 +175,11 @@ pub struct ReplayUploadCfg {
     pub debug_logging: bool,
 }
 
+// Older replay settings had an explicit Start button and implied uploading.
+fn legacy_replay_upload_enabled() -> bool {
+    true
+}
+
 fn default_replay_naming_template() -> String {
     "Hebnix - {gamemode} - {date} {time24}".to_string()
 }
@@ -177,6 +187,9 @@ fn default_replay_naming_template() -> String {
 impl Default for ReplayUploadCfg {
     fn default() -> Self {
         Self {
+            upload_enabled: false,
+            save_locally: false,
+            save_directory: String::new(),
             provider: "ballchasing.com".to_string(),
             api_key: String::new(),
             naming_template: default_replay_naming_template(),

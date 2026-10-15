@@ -1070,9 +1070,17 @@ impl UpkPackage {
         if end > self.image.len() {
             return Err("Patch is outside UPK".into());
         }
-        if offset >= self.header.name_offset
-            && end <= self.header.name_offset + self.decrypted_header.len()
-        {
+        // The physical encrypted header includes a chunk table/padding past the
+        // virtual header boundary. Export bytes at those logical addresses are
+        // chunk data, not header bytes: writing them into decrypted_header can
+        // corrupt compression metadata instead of changing the actual object.
+        let logical_header_end = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.uncompressed_offset)
+            .min()
+            .unwrap_or(self.header.name_offset + self.decrypted_header.len());
+        if offset >= self.header.name_offset && end <= logical_header_end {
             self.image[offset..end].copy_from_slice(data);
             let rel = offset - self.header.name_offset;
             self.decrypted_header[rel..rel + data.len()].copy_from_slice(data);
@@ -1339,4 +1347,60 @@ fn pack_chunk(payload: &[u8], block_size: usize) -> Result<Vec<u8>, String> {
 
 pub fn strip(name: &str) -> &str {
     name.strip_suffix("_-2").unwrap_or(name)
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn logical_export_bytes_must_not_overwrite_physical_chunk_metadata() {
+        let mut package = UpkPackage {
+            raw: vec![0; 256],
+            header: Header {
+                file_version: 868,
+                licensee_version: 22,
+                package_flags: 0,
+                nonce: [0; 12],
+                last_block_size: 0,
+                total_header_size: 128,
+                name_count: 0,
+                name_offset: 64,
+                export_count: 0,
+                export_offset: 64,
+                import_count: 0,
+                import_offset: 64,
+                generation_padding_size: 0,
+                chunk_table_offset: 64,
+            },
+            key: [0; 32],
+            encrypted_header_size: 128,
+            decrypted_header: vec![9; 128],
+            chunks: vec![Chunk {
+                uncompressed_offset: 128,
+                uncompressed_size: 128,
+                compressed_offset: 192,
+                physical_size: 64,
+                block_size: 128,
+                table_entry_offset: 64,
+                nonce: None,
+            }],
+            image: vec![0; 256],
+            names: vec![],
+            imports: vec![],
+            exports: vec![],
+            modified_chunks: HashSet::new(),
+            header_dirty: false,
+            raw_dirty: false,
+        };
+        let header_before = package.decrypted_header.clone();
+        package.patch(144, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(package.decrypted_header, header_before);
+        assert!(!package.header_dirty);
+        assert_eq!(package.modified_chunks, HashSet::from([0]));
+        assert_eq!(&package.image[144..148], &[1, 2, 3, 4]);
+        package.patch(80, &[5, 6, 7, 8]).unwrap();
+        assert!(package.header_dirty);
+        assert_eq!(&package.decrypted_header[16..20], &[5, 6, 7, 8]);
+    }
 }

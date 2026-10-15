@@ -1006,7 +1006,6 @@ impl WorkshopState {
         self.rl_launch = rl_launch.clone();
         let ctx = ui.ctx().clone();
 
-        let previous_view = self.view;
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.view,
@@ -1066,7 +1065,6 @@ impl WorkshopState {
             return;
         }
         if self.view == WorkshopView::MenuMap {
-            if previous_view != WorkshopView::MenuMap { self.menu_map.refresh(rl_path); }
             self.menu_map.render(ui, rl_path, tx);
             return;
         }

@@ -56,18 +56,24 @@ fn arena_package(name: &str) -> bool {
 pub fn installed_arenas(cooked: &Path) -> Result<Vec<Arena>, String> {
     let mut arenas = Vec::new();
     for entry in fs::read_dir(cooked).map_err(|e| format!("Could not read the game maps: {e}"))? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if !path.is_file()
-            || !path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("upk"))
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("upk"))
         {
             continue;
         }
         let Some(package) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if arena_package(package) {
+        // Filter names before asking for metadata. CookedPCConsole contains
+        // thousands of unrelated packages, and per-file stat calls are slow.
+        if !arena_package(package) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             arenas.push(Arena {
                 label: crate::discord_presence::display_map_name(package),
                 package: package.to_string(),
@@ -544,6 +550,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn scan_lists_only_arena_package_files() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("Beach_P.upk"), b"map").unwrap();
+        fs::write(fixture.0.join("Stadium_P.UPK"), b"map").unwrap();
+        fs::write(fixture.0.join("BG_UF_Day_P.upk"), b"scenery").unwrap();
+        fs::write(fixture.0.join("Farm_P.txt"), b"not a package").unwrap();
+        fs::create_dir(fixture.0.join("Underwater_P.upk")).unwrap();
+        let arenas = installed_arenas(&fixture.0).unwrap();
+        assert_eq!(arenas.len(), 2);
+        assert!(arenas.iter().any(|arena| arena.package == "Beach_P"));
+        assert!(arenas.iter().any(|arena| arena.package == "Stadium_P"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::ReplayUploadCfg;
+use crate::config::{ReplayUploadCfg, RlLaunchCfg, RlLaunchMode};
 use crate::messages::AppMsg;
 
 const HISTORY_FILE: &str = "replay_upload_history.json";
@@ -31,6 +31,8 @@ pub struct UploadHistoryEntry {
     pub warning: String,
     #[serde(default)]
     pub duplicate: bool,
+    #[serde(default)]
+    pub local_path: String,
 }
 
 #[derive(Debug)]
@@ -48,7 +50,6 @@ struct TrackedMatch {
 pub struct AutoUploadReplays {
     base_dir: PathBuf,
     running: bool,
-    starting: bool,
     current_match: Option<TrackedMatch>,
     submitted: HashSet<String>,
     pending: HashSet<String>,
@@ -69,12 +70,11 @@ impl AutoUploadReplays {
         Self {
             base_dir: base_dir.to_path_buf(),
             running: false,
-            starting: false,
             current_match: None,
             submitted: HashSet::new(),
             pending: HashSet::new(),
             history,
-            status: "Stopped".to_string(),
+            status: "Disabled".to_string(),
             generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -83,36 +83,28 @@ impl AutoUploadReplays {
         self.running
     }
 
-    pub fn starting(&self) -> bool {
-        self.starting
-    }
-
-    pub fn begin_start(&mut self) -> Result<(), String> {
-        if self.starting || self.running {
-            return Ok(());
-        }
-        self.starting = true;
-        self.status = "Enabling RLAPI capture...".to_string();
-        Ok(())
-    }
-
-    pub fn finish_start(&mut self, result: &Result<(), String>) {
-        self.starting = false;
-        match result {
-            Ok(()) => {
+    pub fn sync(&mut self, enabled: bool, game_running: bool, capture_enabled: bool) {
+        if enabled && game_running && capture_enabled {
+            if !self.running {
                 self.running = true;
                 self.status = "Running · waiting for a match".to_string();
             }
-            Err(error) => {
-                self.running = false;
-                self.status = format!("Could not start: {error}");
+        } else {
+            if self.running {
+                self.stop();
             }
+            self.status = if !enabled {
+                "Disabled"
+            } else if !game_running {
+                "Waiting for Rocket League"
+            } else {
+                "Waiting for the proxy · administrator access and a trusted certificate are required"
+            }.to_string();
         }
     }
 
     pub fn stop(&mut self) {
         self.running = false;
-        self.starting = false;
         self.current_match = None;
         self.pending.clear();
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -148,12 +140,29 @@ impl AutoUploadReplays {
         &mut self,
         event_guid: Option<&str>,
         config: &ReplayUploadCfg,
+        game_path: &Path,
+        launch: &RlLaunchCfg,
         tx: Sender<AppMsg>,
         ctx: egui::Context,
     ) -> Option<String> {
         if !self.running {
             return None;
         }
+        if !config.upload_enabled && !config.save_locally {
+            self.status = "Select upload to ballchasing.com or save locally".to_string();
+            return None;
+        }
+        let local_dir = if config.save_locally {
+            match configured_replay_directory(config, game_path, launch) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    self.status = error;
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let tracked = self.current_match.as_ref()?;
         if let Some(event_guid) = event_guid {
             if normalize_guid(event_guid) != tracked.match_guid {
@@ -173,6 +182,8 @@ impl AutoUploadReplays {
             .then(|| format!("[Replay Upload] polling match {}", tracked.match_guid));
         let job = UploadJob {
             tracked,
+            upload_enabled: config.upload_enabled,
+            local_dir,
             api_key: config.api_key.trim().to_string(),
             naming_template: config.naming_template.trim().to_string(),
             visibility: config.visibility.clone(),
@@ -203,18 +214,14 @@ impl AutoUploadReplays {
         }
         match result.result {
             Ok(entry) => {
-                self.status = if entry.duplicate {
-                    format!("Replay already existed: {}", entry.match_guid)
-                } else {
-                    format!("Uploaded replay {}", entry.match_guid)
-                };
+                self.status = format!("{} replay {}", replay_outcome(&entry), entry.match_guid);
                 self.history
                     .retain(|item| item.match_guid != entry.match_guid);
                 self.history.insert(0, entry);
                 self.history.truncate(20);
                 self.save_history();
             }
-            Err(error) => self.status = format!("Upload failed for {}: {error}", result.match_guid),
+            Err(error) => self.status = format!("Replay failed for {}: {error}", result.match_guid),
         }
     }
 
@@ -224,9 +231,9 @@ impl AutoUploadReplays {
         }
     }
 
-    pub fn show(&self, ui: &mut egui::Ui, session_status: &str) {
-        ui.heading("Auto Upload Replays");
-        ui.label("Automatically uploads only matches detected while this feature is running.");
+    pub fn show_status(&self, ui: &mut egui::Ui, session_status: &str) {
+        ui.heading("Replays");
+        ui.label("Automatically saves or uploads matches while either replay option is enabled.");
         ui.add_space(8.0);
         ui.label(&self.status);
         ui.small(session_status);
@@ -236,10 +243,12 @@ impl AutoUploadReplays {
                 ui.label(format!("{} replay(s) pending", self.pending.len()));
             });
         }
-        ui.add_space(12.0);
-        ui.heading("Last 20 uploaded matches");
+    }
+
+    pub fn show_history(&self, ui: &mut egui::Ui) {
+        ui.heading("Last 20 replays");
         if self.history.is_empty() {
-            ui.label("No replays uploaded yet.");
+            ui.label("No replays saved or uploaded yet.");
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("replay_upload_history")
@@ -247,13 +256,14 @@ impl AutoUploadReplays {
                     for entry in &self.history {
                         ui.horizontal_wrapped(|ui| {
                             ui.monospace(&entry.match_guid);
-                            ui.label(if entry.duplicate {
-                                "Already uploaded"
-                            } else {
-                                "Uploaded"
-                            });
-                            ui.hyperlink_to("Open on ballchasing.com", &entry.location);
+                            ui.label(replay_outcome(entry));
+                            if !entry.location.is_empty() {
+                                ui.hyperlink_to("Open on ballchasing.com", &entry.location);
+                            }
                         });
+                        if !entry.local_path.is_empty() {
+                            ui.small(format!("Saved to {}", entry.local_path));
+                        }
                         if !entry.title.is_empty() {
                             ui.label(&entry.title);
                         }
@@ -269,6 +279,8 @@ impl AutoUploadReplays {
 
 struct UploadJob {
     tracked: TrackedMatch,
+    upload_enabled: bool,
+    local_dir: Option<PathBuf>,
     api_key: String,
     naming_template: String,
     visibility: String,
@@ -284,8 +296,11 @@ impl UploadJob {
 }
 
 fn run_upload(job: UploadJob) -> Result<UploadHistoryEntry, String> {
-    if job.api_key.is_empty() {
+    if job.upload_enabled && job.api_key.is_empty() && job.local_dir.is_none() {
         return Err("enter a ballchasing.com API key".to_string());
+    }
+    if !job.upload_enabled && job.local_dir.is_none() {
+        return Err("select upload to ballchasing.com or save locally".to_string());
     }
     let deadline = Instant::now() + POLL_TIMEOUT;
     let mut first_attempt = true;
@@ -366,6 +381,69 @@ fn download_and_upload(
         return Err("stopped".to_string());
     }
 
+    deliver_replay(job, &replay, title, || {
+        upload_replay(&client, job, &replay, title)
+    })
+}
+
+// The local destination writes the downloaded bytes directly. It never calls
+// Epic's replay upload service or the game's cloud-save APIs.
+fn deliver_replay(
+    job: &UploadJob,
+    replay: &[u8],
+    title: &str,
+    upload: impl FnOnce() -> Result<UploadHistoryEntry, String>,
+) -> Result<UploadHistoryEntry, String> {
+    if job.cancelled() {
+        return Err("stopped".to_string());
+    }
+    let local_result = job
+        .local_dir
+        .as_ref()
+        .map(|directory| save_local_replay(directory, &job.tracked.match_guid, replay));
+    let mut entry = UploadHistoryEntry {
+        match_guid: job.tracked.match_guid.clone(),
+        replay_id: String::new(),
+        location: String::new(),
+        title: title.to_string(),
+        warning: String::new(),
+        duplicate: false,
+        local_path: String::new(),
+    };
+    if job.upload_enabled {
+        if job.cancelled() {
+            return Err("stopped".to_string());
+        }
+        match upload() {
+            Ok(uploaded) => entry = uploaded,
+            Err(error) if matches!(&local_result, Some(Ok(_))) => {
+                entry.warning = format!("Replay saved locally, but upload failed: {error}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    match local_result {
+        Some(Ok(path)) => entry.local_path = path.to_string_lossy().into_owned(),
+        Some(Err(error)) if !entry.replay_id.is_empty() => {
+            if !entry.warning.is_empty() {
+                entry.warning.push('\n');
+            }
+            entry
+                .warning
+                .push_str(&format!("Replay uploaded, but local save failed: {error}"));
+        }
+        Some(Err(error)) => return Err(error),
+        None => {}
+    }
+    Ok(entry)
+}
+
+fn upload_replay(
+    client: &reqwest::blocking::Client,
+    job: &UploadJob,
+    replay: &[u8],
+    title: &str,
+) -> Result<UploadHistoryEntry, String> {
     let mut url = reqwest::Url::parse("https://ballchasing.com/api/v2/upload")
         .map_err(|error| error.to_string())?;
     url.query_pairs_mut()
@@ -421,7 +499,99 @@ fn download_and_upload(
         title: title.to_string(),
         warning,
         duplicate: status.as_u16() == 409,
+        local_path: String::new(),
     })
+}
+
+pub fn replay_directory(game_path: &Path, launch: &RlLaunchCfg) -> Result<PathBuf, String> {
+    use hebnix_sdk::process::{RlPlatform, detect_platform};
+    let steam = match detect_platform(game_path) {
+        RlPlatform::Steam => true,
+        RlPlatform::Epic => false,
+        RlPlatform::Unknown => launch.mode == RlLaunchMode::SteamNative,
+    };
+    let documents = dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .filter(|path| path.is_absolute())
+        .ok_or("Documents folder is unavailable")?;
+    Ok(replay_directory_in(&documents, steam))
+}
+
+pub fn configured_replay_directory(
+    config: &ReplayUploadCfg,
+    game_path: &Path,
+    launch: &RlLaunchCfg,
+) -> Result<PathBuf, String> {
+    let directory = config.save_directory.trim();
+    if directory.is_empty() {
+        return replay_directory(game_path, launch);
+    }
+    let path = PathBuf::from(directory);
+    if !path.is_absolute() {
+        return Err("Choose an absolute replay save folder".into());
+    }
+    Ok(path)
+}
+
+fn replay_directory_in(documents: &Path, steam: bool) -> PathBuf {
+    documents
+        .join("My Games")
+        .join("Rocket League")
+        .join("TAGame")
+        .join(if steam { "Demos" } else { "DemosEpic" })
+}
+
+fn save_local_replay(directory: &Path, match_guid: &str, replay: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write;
+    // Match history is remote data; never allow its GUID to become a path.
+    if match_guid.is_empty()
+        || match_guid.len() > 128
+        || !match_guid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("match history returned an invalid match GUID".to_string());
+    }
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create replay folder: {error}"))?;
+    let path = directory.join(format!("{match_guid}.replay"));
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read(&path).ok().as_deref() == Some(replay) {
+                return Ok(path);
+            }
+            return Err(format!(
+                "a different replay already exists at {}",
+                path.display()
+            ));
+        }
+        Err(error) => return Err(format!("could not save replay: {error}")),
+    };
+    if let Err(error) = file.write_all(replay).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("could not save replay: {error}"));
+    }
+    Ok(path)
+}
+
+fn replay_outcome(entry: &UploadHistoryEntry) -> &'static str {
+    match (
+        !entry.local_path.is_empty(),
+        !entry.replay_id.is_empty(),
+        entry.duplicate,
+    ) {
+        (true, true, true) => "Saved locally · already uploaded",
+        (true, true, false) => "Saved locally · uploaded",
+        (true, false, _) => "Saved locally",
+        (false, _, true) => "Already uploaded",
+        _ => "Uploaded",
+    }
 }
 
 fn patch_replay_title(
@@ -565,6 +735,215 @@ fn normalize_guid(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_options_follow_game_and_capture_without_a_start_button() {
+        let mut replays = AutoUploadReplays::new(Path::new("nonexistent-replay-test"));
+        replays.sync(true, false, false);
+        assert!(!replays.running());
+        replays.sync(true, true, false);
+        assert!(!replays.running());
+        replays.sync(true, true, true);
+        replays.track_match("first", Some("player".into()));
+        replays.sync(true, true, true);
+        assert_eq!(replays.current_match.as_ref().unwrap().match_guid, "FIRST");
+
+        replays.pending.insert("FIRST".into());
+        let generation = replays.generation.load(Ordering::Acquire);
+        replays.sync(false, true, true);
+        assert!(!replays.running());
+        assert!(replays.current_match.is_none());
+        assert!(replays.pending.is_empty());
+        assert!(replays.generation.load(Ordering::Acquire) > generation);
+
+        replays.sync(true, true, true);
+        assert!(replays.running());
+        replays.sync(true, false, false);
+        assert!(!replays.running());
+        replays.sync(true, true, true);
+        replays.track_match("second", Some("player".into()));
+        assert_eq!(replays.current_match.as_ref().unwrap().match_guid, "SECOND");
+    }
+
+    #[test]
+    fn replay_folder_override_and_reset_preserve_platform_detection() {
+        let game = Path::new("unknown-game-installation");
+        let launch = RlLaunchCfg::default();
+        let mut config = ReplayUploadCfg::default();
+        assert!(!config.upload_enabled && !config.save_locally);
+        let automatic = configured_replay_directory(&config, game, &launch).unwrap();
+        let custom = std::env::temp_dir().join("hebnix-custom-replays");
+        config.save_directory = custom.to_string_lossy().into_owned();
+        assert_eq!(
+            configured_replay_directory(&config, game, &launch).unwrap(),
+            custom
+        );
+        config.save_directory = "relative-folder".into();
+        assert!(configured_replay_directory(&config, game, &launch).is_err());
+        config.save_directory.clear();
+        assert_eq!(
+            configured_replay_directory(&config, game, &launch).unwrap(),
+            automatic
+        );
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            Self(
+                std::env::temp_dir()
+                    .join(format!("hebnix-replay-test-{:016x}", rand::random::<u64>())),
+            )
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn local_job(directory: &Path) -> UploadJob {
+        UploadJob {
+            tracked: TrackedMatch {
+                match_guid: "ABC-123".to_string(),
+                player_id: "test-player".to_string(),
+            },
+            upload_enabled: false,
+            local_dir: Some(directory.to_path_buf()),
+            api_key: String::new(),
+            naming_template: String::new(),
+            visibility: "private".to_string(),
+            group_id: String::new(),
+            generation: Arc::new(AtomicU64::new(0)),
+            expected_generation: 0,
+        }
+    }
+
+    #[test]
+    fn local_only_saves_bytes_without_calling_upload() {
+        let directory = TestDirectory::new();
+        let job = local_job(&directory.0);
+        let entry = deliver_replay(&job, b"replay bytes", "Test replay", || {
+            panic!("local-only saving must not call an upload service")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&entry.local_path).unwrap(), b"replay bytes");
+        assert!(entry.replay_id.is_empty());
+        assert!(entry.location.is_empty());
+        assert_eq!(replay_outcome(&entry), "Saved locally");
+    }
+
+    #[test]
+    fn local_success_survives_an_upload_failure() {
+        let directory = TestDirectory::new();
+        let mut job = local_job(&directory.0);
+        job.upload_enabled = true;
+        let entry = deliver_replay(&job, b"replay bytes", "Test replay", || {
+            Err("provider unavailable".to_string())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&entry.local_path).unwrap(), b"replay bytes");
+        assert!(entry.warning.contains("provider unavailable"));
+        assert_eq!(replay_outcome(&entry), "Saved locally");
+    }
+
+    #[test]
+    fn local_failure_does_not_hide_a_successful_upload() {
+        let directory = TestDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let blocked_path = directory.0.join("not-a-directory");
+        std::fs::write(&blocked_path, b"existing file").unwrap();
+        let mut job = local_job(&blocked_path);
+        job.upload_enabled = true;
+        let entry = deliver_replay(&job, b"replay bytes", "Test replay", || {
+            Ok(UploadHistoryEntry {
+                match_guid: job.tracked.match_guid.clone(),
+                replay_id: "uploaded-id".to_string(),
+                location: "https://ballchasing.com/replay/uploaded-id".to_string(),
+                title: "Test replay".to_string(),
+                warning: String::new(),
+                duplicate: false,
+                local_path: String::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(entry.replay_id, "uploaded-id");
+        assert!(entry.local_path.is_empty());
+        assert!(entry.warning.contains("local save failed"));
+    }
+
+    #[test]
+    fn stopped_jobs_do_not_save_or_upload() {
+        let directory = TestDirectory::new();
+        let job = local_job(&directory.0);
+        job.generation.fetch_add(1, Ordering::AcqRel);
+        assert!(deliver_replay(&job, b"replay bytes", "", || panic!("cancelled upload")).is_err());
+        assert!(!directory.0.exists());
+        // Local-only jobs need no ballchasing key; cancellation is checked first.
+        assert_eq!(run_upload(job).unwrap_err(), "stopped");
+    }
+
+    #[test]
+    fn local_saving_preserves_existing_replays_and_rejects_paths() {
+        let directory = TestDirectory::new();
+        let path = save_local_replay(&directory.0, "ABC123", b"original").unwrap();
+        assert_eq!(
+            save_local_replay(&directory.0, "ABC123", b"original").unwrap(),
+            path
+        );
+        assert!(save_local_replay(&directory.0, "ABC123", b"different").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        for guid in ["../outside", "..\\outside", "C:\\outside", ""] {
+            assert!(save_local_replay(&directory.0, guid, b"replay").is_err());
+        }
+    }
+
+    #[test]
+    fn selects_the_replay_folder_for_the_game_platform() {
+        let documents = Path::new(r"C:\Users\Player\Documents");
+        assert_eq!(
+            replay_directory_in(documents, true),
+            documents.join(r"My Games\Rocket League\TAGame\Demos")
+        );
+        assert_eq!(
+            replay_directory_in(documents, false),
+            documents.join(r"My Games\Rocket League\TAGame\DemosEpic")
+        );
+        let launch = RlLaunchCfg::default();
+        assert!(
+            replay_directory(
+                Path::new(r"D:\SteamLibrary\steamapps\common\rocketleague"),
+                &launch
+            )
+            .unwrap()
+            .ends_with("Demos")
+        );
+        assert!(
+            replay_directory(
+                Path::new(r"C:\Program Files\Epic Games\rocketleague"),
+                &launch
+            )
+            .unwrap()
+            .ends_with("DemosEpic")
+        );
+    }
+
+    #[test]
+    fn existing_config_and_history_keep_upload_behavior() {
+        let config: ReplayUploadCfg = serde_json::from_value(serde_json::json!({
+            "api_key": "existing-key", "visibility": "private"
+        }))
+        .unwrap();
+        assert!(config.upload_enabled);
+        assert!(!config.save_locally);
+        let entry: UploadHistoryEntry = serde_json::from_value(serde_json::json!({
+            "match_guid": "OLD", "replay_id": "old-id", "location": "https://ballchasing.com/replay/old-id"
+        })).unwrap();
+        assert!(entry.local_path.is_empty());
+        assert_eq!(replay_outcome(&entry), "Uploaded");
+    }
 
     #[test]
     fn finds_only_the_requested_match() {

@@ -13,7 +13,7 @@ pub use crate::recovery_tasks::session_marker;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
@@ -205,9 +205,82 @@ pub struct SpooferManager {
     certificate_blocked: AtomicBool,
     closing: AtomicBool,
     lifecycle_started: AtomicBool,
+    requested_options: AtomicU8,
+}
+
+/// Consumers of the shared proxy. Transport switches are derived from features.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProxyOptions {
+    pub account: bool,
+    pub psynet: bool,
+    pub replays: bool,
+}
+
+impl ProxyOptions {
+    fn bits(self) -> u8 {
+        u8::from(self.account) | (u8::from(self.psynet) << 1) | (u8::from(self.replays) << 2)
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        Self {
+            account: bits & 1 != 0,
+            psynet: bits & 2 != 0,
+            replays: bits & 4 != 0,
+        }
+    }
 }
 
 impl SpooferManager {
+    pub fn game_running(&self) -> bool {
+        self.game_present.load(Ordering::Acquire)
+    }
+
+    pub fn configure(&self, options: ProxyOptions) {
+        self.requested_options
+            .store(options.bits(), Ordering::Release);
+    }
+
+    // Only the lifecycle worker starts listeners. It also runs while the UI is hidden.
+    fn sync_proxy_options(&self) -> Result<(), String> {
+        let active = self.game_present.load(Ordering::Acquire)
+            && !self.closing.load(Ordering::Acquire)
+            && !self.certificate_blocked.load(Ordering::Acquire)
+            && is_admin();
+        let options = if active {
+            ProxyOptions::from_bits(self.requested_options.load(Ordering::Acquire))
+        } else {
+            ProxyOptions::default()
+        };
+        // Disable consumers first; retained connections continue to relay without spoofs.
+        if !options.replays && hebnix_sdk::rlapi::session::shared_game_session().enabled() {
+            self.disable_rlapi();
+        }
+        if !options.account && self.http_active.load(Ordering::Acquire) {
+            self.stop_http();
+        }
+        if !options.psynet && self.socket_active.load(Ordering::Acquire) {
+            self.stop_socket();
+        }
+        if options.account && !self.http_running() {
+            self.start_http()?;
+        }
+        if options.psynet && !self.socket_running() {
+            self.start_socket()?;
+        }
+        if options.replays
+            && (!hebnix_sdk::rlapi::session::shared_game_session().enabled()
+                || !self
+                    .reverse_proxy
+                    .lock()
+                    .map(|p| p.as_ref().is_some_and(SocketProxy::is_running))
+                    .unwrap_or(false))
+        {
+            self.enable_rlapi()?;
+        }
+        self.cleanup_idle_rlapi();
+        Ok(())
+    }
+
     fn ensure_crl(&self, ca: &ca::Ca) -> Result<(), String> {
         let mut slot = self.crl.lock().map_err(|_| "CRL lock poisoned")?;
         if slot.is_some() {
@@ -265,6 +338,7 @@ impl SpooferManager {
             certificate_blocked: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             lifecycle_started: AtomicBool::new(false),
+            requested_options: AtomicU8::new(0),
         }
     }
 
@@ -375,20 +449,6 @@ impl SpooferManager {
     pub fn update_ranks(&self, ranks: HashMap<i32, (i32, f64)>) {
         if let Ok(mut guard) = self.spoofed_ranks.lock() {
             *guard = ranks;
-        }
-        if self
-            .spoofed_ranks
-            .lock()
-            .map(|ranks| !ranks.is_empty())
-            .unwrap_or(false)
-        {
-            if let Err(error) = self.start_skill_bridge() {
-                let detail = format!("[Spoofer] Rank bridge failed to start: {error}");
-                let _ = std::fs::write(self.base_dir.join("rank_spoofer_status.log"), &detail);
-                let _ = self.tx.send(AppMsg::Log(detail));
-            }
-        } else {
-            self.stop_skill_bridge();
         }
     }
 
@@ -541,13 +601,13 @@ impl SpooferManager {
         }
         if self.certificate_blocked.load(Ordering::Acquire) {
             return Err(
-                "Certificate removal disabled the proxy. Enable HTTP/WS proxy to set it up again."
+                "Certificate removal disabled the proxy. Enable Spoofer or a replay option to set it up again."
                     .into(),
             );
         }
         if !ca::is_current_installed(&self.base_dir) {
             return Err(
-                "The proxy certificate is not trusted. Enable HTTP/WS proxy to install it.".into(),
+                "The proxy certificate is not trusted. Enable Spoofer or a replay option to install it.".into(),
             );
         }
         let mut slot = self
@@ -730,6 +790,7 @@ impl SpooferManager {
     /// Stops only runtime interception. It deliberately does not modify saved
     /// spoof settings, so the user's enabled toggles survive the next launch.
     pub fn shutdown(&self) {
+        self.configure(ProxyOptions::default());
         self.rlapi_retained.store(false, Ordering::Release);
         self.account_retained.store(false, Ordering::Release);
         hebnix_sdk::rlapi::session::shared_game_session().reset();
@@ -757,7 +818,7 @@ impl SpooferManager {
     }
 
     /// Keep redirect lifetimes independent of UI repaints and StatsAPI probes.
-    /// Listeners stay warm while idle, but no global redirect remains active.
+    /// Enabled consumers start when the game runs and stop when it exits.
     pub fn start_lifecycle_monitor(self: &Arc<Self>) -> Result<(), String> {
         let manager = Arc::downgrade(self);
         std::thread::Builder::new()
@@ -782,7 +843,9 @@ impl SpooferManager {
                             let _ = manager.tx.send(AppMsg::SpooferCertificateLost);
                         }
                     }
-                    let result = manager.reconcile_hosts();
+                    let result = manager
+                        .sync_proxy_options()
+                        .and_then(|_| manager.reconcile_hosts());
                     if let Err(error) = result {
                         if last_error.as_ref() != Some(&error) {
                             let _ = manager.tx.send(AppMsg::Log(format!("[Spoofer] {error}")));

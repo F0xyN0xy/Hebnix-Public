@@ -273,7 +273,7 @@ enum Job {
 
 type JobResult = Result<String, String>;
 
-/// Experimental tab: the Items page switch plus a one-off package patcher.
+/// Items animation speed tab: the swapper switch plus a one-off package patcher.
 pub struct State {
     package: Option<PathBuf>,
     speed: f32,

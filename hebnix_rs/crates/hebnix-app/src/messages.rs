@@ -19,7 +19,6 @@ pub enum AppMsg {
     SpooferCertificateLost,
     RlApiCaptureReady(Result<(), String>),
     RlApiResponse(Result<Value, String>),
-    ReplayUploadCaptureReady(Result<(), String>),
     ReplayUploadFinished(crate::auto_upload_replays::UploadResult),
     GameEvent(StatsEvent),
     /// text chat read off the LAN match traffic (see multiplayer_lan::chat_capture)
