@@ -207,6 +207,7 @@ about-built-with-help-from-the-community =
     Mitwirkende:
     xplodingeggo
     rlyvision
+    FoxyNoxy
 statsapi-notice-set-20 = 20 setzen
 web-port-notice-set-49124 = 49124 setzen
 web-port-notice-dismiss = Schließen

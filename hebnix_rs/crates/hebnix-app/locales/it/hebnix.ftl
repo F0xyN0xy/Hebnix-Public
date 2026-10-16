@@ -190,6 +190,7 @@ about-built-with-help-from-the-community =
     Collaboratori:
     xplodingeggo
     rlyvision
+    FoxyNoxy
 statsapi-notice-set-20 = Imposta 20
 web-port-notice-set-49124 = Imposta 49124
 web-port-notice-dismiss = Chiudi
