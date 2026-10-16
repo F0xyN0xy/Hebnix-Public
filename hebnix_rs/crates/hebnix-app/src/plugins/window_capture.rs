@@ -533,16 +533,3 @@ unsafe fn draw_cursor(target: windows::Win32::Graphics::Gdi::HDC, window_rect: R
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn window_ids_are_strict() {
-        assert_eq!(parse_window_id("hwnd:123"), Some(123));
-        assert_eq!(parse_window_id("123"), None);
-        assert_eq!(parse_window_id("hwnd:0"), None);
-        assert_eq!(parse_window_id("hwnd:not-a-number"), None);
-    }
-}

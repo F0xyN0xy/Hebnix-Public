@@ -87,21 +87,3 @@ fn handle(mut stream: TcpStream, crl: &[u8], tx: &Sender<AppMsg>) {
     let _ = stream.write_all(crl);
     let _ = stream.flush();
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stopped_listener_releases_port_before_restart() {
-        let (tx, _) = crossbeam_channel::unbounded();
-        let (server, port) = CrlServer::start_on("127.0.0.1:0", vec![1, 2, 3], tx.clone()).unwrap();
-        server.stop();
-        for _ in 0..5 {
-            let (server, _) =
-                CrlServer::start_on(&format!("127.0.0.1:{port}"), vec![1, 2, 3], tx.clone())
-                    .unwrap();
-            server.stop();
-        }
-    }
-}

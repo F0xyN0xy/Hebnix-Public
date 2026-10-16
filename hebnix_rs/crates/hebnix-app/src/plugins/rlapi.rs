@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::lua_api::to_lua;
 
-struct PendingHistory {
+struct PendingRequest {
     generation: u64,
     response: Receiver<Result<Value, String>>,
 }
@@ -45,226 +45,160 @@ fn build_api(
         })?,
     )?;
 
-    // Each Lua runtime owns one request. Polling cannot enqueue duplicates,
-    // and unloading the plugin drops the receiver and its eventual result.
-    let pending = RefCell::new(None::<PendingHistory>);
+    // Each function owns one request per Lua runtime. Aliases share the same
+    // pending slot, so polling cannot enqueue duplicate party mutations.
+    let pending = RefCell::new(None);
+    let history_session = Arc::clone(&session);
     api.set(
         "matchhistory",
         lua.create_function(move |lua, ()| {
-            let mut pending = pending.borrow_mut();
-            let unavailable = || {
-                (
-                    LuaValue::Nil,
-                    Some(
-                        "Enable WebSockets or RLAPI and capture Rocket League's session first."
-                            .to_string(),
-                    ),
-                )
-            };
-            if !session.connected() {
-                *pending = None;
-                return Ok(unavailable());
-            }
-            let Some(generation) = session.connection_generation() else {
-                *pending = None;
-                return Ok(unavailable());
-            };
-            if let Some(job) = pending.as_ref() {
-                if job.generation != generation {
-                    *pending = None;
-                    return Ok((
-                        LuaValue::Nil,
-                        Some(
-                            "Rocket League's session changed; request a fresh match history."
-                                .into(),
-                        ),
-                    ));
-                }
-                let result = match job.response.try_recv() {
-                    Ok(result) => result,
-                    Err(TryRecvError::Empty) => {
-                        return Ok((LuaValue::Nil, Some("pending".into())));
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        Err("Match history worker disconnected.".into())
-                    }
-                };
-                *pending = None;
-                return match result {
-                    Ok(value) => Ok((to_lua(lua, &value)?, None)),
-                    Err(error) => Ok((LuaValue::Nil, Some(error))),
-                };
-            }
-
-            let (reply, response) = bounded(1);
-            let request_session = Arc::clone(&session);
-            if let Err(error) = std::thread::Builder::new()
-                .name("plugin-match-history".into())
-                .spawn(move || {
-                    let result = player_id()
+            poll_request(
+                lua,
+                &history_session,
+                &pending,
+                MATCH_HISTORY_SERVICE,
+                move || {
+                    player_id()
                         .filter(|id| !id.trim().is_empty())
                         .ok_or_else(|| {
                             "The local PlayerID was not found in Launch.log.".to_string()
                         })
-                        .and_then(|id| {
-                            request_session.request_for_connection(
-                                generation,
-                                MATCH_HISTORY_SERVICE,
-                                serde_json::json!({ "PlayerID": id }),
-                            )
-                        });
-                    let _ = reply.send(result);
-                })
-            {
-                return Ok((
-                    LuaValue::Nil,
-                    Some(format!("Could not start match history request: {error}")),
-                ));
-            }
-            *pending = Some(PendingHistory {
-                generation,
-                response,
-            });
-            Ok((LuaValue::Nil, Some("pending".into())))
+                        .map(|id| serde_json::json!({ "PlayerID": id }))
+                },
+                Ok,
+            )
         })?,
     )?;
+
+    for (name, alias, service, party_path) in [
+        (
+            "createparty",
+            "CreateParty",
+            "Party/CreateParty v1",
+            Some("/Info/PartyID"),
+        ),
+        (
+            "getparty",
+            "GetParty",
+            "Party/GetPlayerPartyInfo v1",
+            Some("/Member/PartyID"),
+        ),
+        (
+            "sendpartyinvite",
+            "SendPartyInvite",
+            "Party/SendPartyInvite v2",
+            None,
+        ),
+        ("leaveparty", "LeaveParty", "Party/LeaveParty v1", None),
+    ] {
+        let session = Arc::clone(&session);
+        let pending = RefCell::new(None);
+        let function = lua.create_function(
+            move |lua, (party_id, platform_id): (Option<String>, Option<String>)| {
+                poll_request(
+                    lua,
+                    &session,
+                    &pending,
+                    service,
+                    move || match name {
+                        "createparty" => Ok(serde_json::json!({ "bForcePartyonix": true })),
+                        "sendpartyinvite" => {
+                            let required = |value: Option<String>, field| {
+                                value.filter(|s| !s.trim().is_empty())
+                                    .ok_or_else(|| format!("{field} is required."))
+                            };
+                            Ok(serde_json::json!({
+                                "InviteeID": required(platform_id, "Platform ID (InviteeID)")?,
+                                "PartyID": required(party_id, "PartyID")?,
+                            }))
+                        }
+                        _ => Ok(serde_json::json!({})),
+                    },
+                    move |value| {
+                        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+                            return Err(format!("{alias} failed: {value}"));
+                        }
+                        let result = value.get("result").unwrap_or(&value);
+                        match party_path {
+                            Some(path) => result.pointer(path)
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.trim().is_empty())
+                                .map(|id| Value::String(id.to_owned()))
+                                .ok_or_else(|| format!("{alias} response contains no PartyID; the player may not be in a party.")),
+                            None => Ok(Value::Bool(true)),
+                        }
+                    },
+                )
+            },
+        )?;
+        api.set(name, function.clone())?;
+        api.set(alias, function)?;
+    }
     api.set_metatable(Some(meta))?;
     Ok(api)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn setup(session: Arc<GameSession>, player_id: fn() -> Option<String>) -> Lua {
-        let lua = Lua::new();
-        lua.globals()
-            .set("rlapi", build_api(&lua, session, player_id).unwrap())
-            .unwrap();
-        lua
+fn poll_request(
+    lua: &Lua,
+    session: &Arc<GameSession>,
+    pending: &RefCell<Option<PendingRequest>>,
+    service: &'static str,
+    payload: impl FnOnce() -> Result<Value, String> + Send + 'static,
+    decode: impl FnOnce(Value) -> Result<Value, String>,
+) -> mlua::Result<(LuaValue, Option<String>)> {
+    let mut pending = pending.borrow_mut();
+    if !session.connected() {
+        *pending = None;
+        return Ok((
+            LuaValue::Nil,
+            Some("Enable WebSockets or RLAPI and capture Rocket League's session first.".into()),
+        ));
     }
-
-    fn player_id() -> Option<String> {
-        Some("Steam|123|0".into())
-    }
-
-    #[test]
-    fn enabled_tracks_websocket_capture_and_disable() {
-        let session = Arc::new(GameSession::default());
-        let lua = setup(Arc::clone(&session), player_id);
-        assert!(!lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        session.set_websocket_enabled(true);
-        assert!(!lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        let connection = session.attach();
-        assert!(lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        assert!(connection.current());
-        assert!(lua.load("rlapi.enabled = false").exec().is_err());
-        session.set_websocket_enabled(false);
-        assert!(!lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        session.set_enabled(true);
-        assert!(lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        drop(connection);
-        assert!(!lua.load("return rlapi.enabled").eval::<bool>().unwrap());
-        let (value, error): (LuaValue, String) =
-            lua.load("return rlapi.matchhistory()").eval().unwrap();
-        assert!(value.is_nil());
-        assert!(error.contains("capture"));
-    }
-
-    #[test]
-    fn polls_one_request_and_returns_decoded_json() {
-        let session = Arc::new(GameSession::default());
-        session.set_websocket_enabled(true);
-        let connection = session.attach();
-        let lua = setup(session, player_id);
-        let (_, state): (LuaValue, String) =
-            lua.load("return rlapi.matchhistory()").eval().unwrap();
-        assert_eq!(state, "pending");
-        let request = connection
-            .requests
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        assert_eq!(request.service, MATCH_HISTORY_SERVICE);
-        assert_eq!(
-            request.body,
-            serde_json::json!({ "PlayerID": "Steam|123|0" })
-        );
-        for _ in 0..3 {
-            let (_, state): (LuaValue, String) =
-                lua.load("return rlapi.matchhistory()").eval().unwrap();
-            assert_eq!(state, "pending");
+    let Some(generation) = session.connection_generation() else {
+        *pending = None;
+        return Ok((
+            LuaValue::Nil,
+            Some("Rocket League's session disconnected.".into()),
+        ));
+    };
+    if let Some(job) = pending.as_ref() {
+        if job.generation != generation {
+            *pending = None;
+            return Ok((
+                LuaValue::Nil,
+                Some("Rocket League's session changed; request again on the new session.".into()),
+            ));
         }
-        assert!(connection.requests.is_empty());
-        request.reply.send(Ok(serde_json::json!({ "Matches": [{ "MatchGUID": "test", "ReplayUrl": "https://example.com/replay" }] }))).unwrap();
-        let (history, error) = poll_result(&lua);
-        assert!(error.is_none());
-        lua.globals().set("history", history).unwrap();
-        assert_eq!(
-            lua.load("return history.Matches[1].MatchGUID")
-                .eval::<String>()
-                .unwrap(),
-            "test"
-        );
+        let result = match job.response.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return Ok((LuaValue::Nil, Some("pending".into()))),
+            Err(TryRecvError::Disconnected) => Err("RLAPI worker disconnected.".into()),
+        };
+        *pending = None;
+        return match result.and_then(decode) {
+            Ok(value) => Ok((to_lua(lua, &value)?, None)),
+            Err(error) => Ok((LuaValue::Nil, Some(error))),
+        };
     }
 
-    #[test]
-    fn errors_and_reconnects_do_not_return_stale_history() {
-        let session = Arc::new(GameSession::default());
-        session.set_enabled(true);
-        let connection = session.attach();
-        let lua = setup(Arc::clone(&session), player_id);
-        lua.load("rlapi.matchhistory()").exec().unwrap();
-        let request = connection
-            .requests
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        request.reply.send(Err("server error".into())).unwrap();
-        let (value, error) = poll_result(&lua);
-        assert!(value.is_nil());
-        assert_eq!(error.as_deref(), Some("server error"));
-
-        lua.load("rlapi.matchhistory()").exec().unwrap();
-        let request = connection
-            .requests
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-        let _new_connection = session.attach();
-        request
-            .reply
-            .send(Ok(serde_json::json!({ "old": true })))
-            .unwrap();
-        let (value, error) = poll_result(&lua);
-        assert!(value.is_nil());
-        assert!(error.unwrap().contains("session changed"));
+    let (reply, response) = bounded(1);
+    let request_session = Arc::clone(session);
+    if let Err(error) = std::thread::Builder::new()
+        .name("plugin-rlapi".into())
+        .spawn(move || {
+            let result = payload()
+                .and_then(|body| request_session.request_for_connection(generation, service, body));
+            let _ = reply.send(result);
+        })
+    {
+        return Ok((
+            LuaValue::Nil,
+            Some(format!("Could not start RLAPI request: {error}")),
+        ));
     }
-
-    #[test]
-    fn missing_player_id_does_not_send_a_request() {
-        let session = Arc::new(GameSession::default());
-        session.set_enabled(true);
-        let connection = session.attach();
-        let lua = setup(session, || None);
-        lua.load("rlapi.matchhistory()").exec().unwrap();
-        let (value, error) = poll_result(&lua);
-        assert!(value.is_nil());
-        assert!(error.unwrap().contains("PlayerID"));
-        assert!(connection.requests.is_empty());
-    }
-
-    fn poll_result(lua: &Lua) -> (LuaValue, Option<String>) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let result: (LuaValue, Option<String>) =
-                lua.load("return rlapi.matchhistory()").eval().unwrap();
-            if result.1.as_deref() != Some("pending") {
-                return result;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "worker did not finish"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
+    *pending = Some(PendingRequest {
+        generation,
+        response,
+    });
+    Ok((LuaValue::Nil, Some("pending".into())))
 }

@@ -3886,6 +3886,19 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         )?;
     }
 
+    // Update both the live edit buffer and the persisted value.
+    {
+        let host = Rc::clone(&host);
+        ui.set(
+            "set_text_input",
+            lua.create_function(move |_, (key, value): (String, String)| {
+                host.text_bufs.borrow_mut().insert(key.clone(), value.clone());
+                host.store.borrow_mut().set_string(&key, &value);
+                Ok(())
+            })?,
+        )?;
+    }
+
     // Persisted text input: ui.text_input("key", "placeholder") -> string
     {
         let host = Rc::clone(&host);

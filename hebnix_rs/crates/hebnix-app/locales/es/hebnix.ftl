@@ -189,6 +189,7 @@ about-built-with-help-from-the-community =
     Creado con ayuda de la comunidad
     Colaboradores:
     xplodingeggo
+    rlyvision
 statsapi-notice-set-20 = Establecer 20
 web-port-notice-set-49124 = Establecer 49124
 web-port-notice-dismiss = Descartar
@@ -738,8 +739,3 @@ speed-patch-description = Escala las velocidades de desplazamiento y giro de ski
 speed-patch-multiplier = Velocidad
 speed-patch-roundtrip-mismatch = Discrepancia en el ciclo completo del parche de velocidad
 app-speed-patch = Velocidad de animación
-
-overlay-perf-tip-title = Rendimiento del overlay
-overlay-perf-tip-slow = Si los overlays de los plugins se sienten lentos, sube la frecuencia de actualización del overlay en Ajustes > Sistema.
-overlay-perf-tip-choppy = Si Rocket League va a tirones mientras Hebnix está abierto, bájala en su lugar.
-overlay-perf-tip-open-settings = Abrir ajustes

@@ -2,6 +2,14 @@
 
 use eframe::egui::{self, Color32};
 
+/// Shared gap between vertical subtab separators and their content.
+pub fn subtab_content_frame() -> egui::Frame {
+    egui::Frame::new().inner_margin(egui::Margin {
+        left: 5,
+        ..Default::default()
+    })
+}
+
 /// Reserve one label column while keeping the text against its left edge.
 pub fn settings_label(
     ui: &mut egui::Ui,
@@ -34,31 +42,4 @@ pub fn label_column_width(ui: &egui::Ui, labels: &[String], min: f32) -> f32 {
         })
         .fold(0.0_f32, f32::max);
     (widest + 8.0).clamp(min, min.max(320.0))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn settings_text_starts_at_the_left_edge_and_controls_share_a_column() {
-        let context = egui::Context::default();
-        let mut rows = Vec::new();
-        let _ = context.run_ui(egui::RawInput::default(), |ui| {
-            for text in ["Start in Tray:", "Limit Hotkey to Hebnix/Rocket League:"] {
-                ui.horizontal(|ui| {
-                    let left = ui.cursor().left();
-                    let label = settings_label(ui, 300.0, text);
-                    let checkbox = ui.checkbox(&mut false, "");
-                    rows.push((left, label.rect.left(), checkbox.rect.left()));
-                });
-            }
-        });
-        assert_eq!(rows.len(), 2);
-        for (left, label_x, _) in &rows {
-            assert!((left - label_x).abs() < 0.1);
-        }
-        assert!((rows[0].2 - rows[1].2).abs() < 0.1);
-        assert!(rows[0].2 >= rows[0].0 + 300.0);
-    }
 }

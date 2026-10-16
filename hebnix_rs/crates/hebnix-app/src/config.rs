@@ -66,8 +66,6 @@ pub struct SettingsCfg {
     /// read text chat out of LAN match traffic: logs it to chat_log.jsonl and
     /// sends plugins a ChatMessage game event. Off by default.
     pub chat_export: bool,
-    /// the overlay refresh rate tip on the Plugins tab was dismissed
-    pub overlay_perf_tip_seen: bool,
     /// how often the overlay and plugins update while a plugin is reading the
     /// screen (fps). lower saves CPU on slower PCs
     pub overlay_refresh_fps: u32,
@@ -102,7 +100,6 @@ impl Default for SettingsCfg {
             discord_custom_message: "Playing Rocket League".to_string(),
             p2p_file_sharing: true,
             chat_export: false,
-            overlay_perf_tip_seen: false,
             overlay_refresh_fps: 60,
         }
     }

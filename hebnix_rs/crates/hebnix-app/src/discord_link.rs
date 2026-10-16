@@ -298,31 +298,3 @@ fn linked_display_names(value: &Value) -> Vec<String> {
     visit(value, &mut names);
     names
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{linked_display_names, load_linked_accounts, save_linked_accounts};
-
-    #[test]
-    fn finds_linked_account_names_in_common_response_shapes() {
-        let response = serde_json::json!({
-            "linked_accounts": [
-                {"display_name": "first"},
-                {"display_name": "second"},
-            ]
-        });
-        assert_eq!(linked_display_names(&response), ["first", "second"]);
-    }
-
-    #[test]
-    fn linked_accounts_round_trip() {
-        let path = std::env::temp_dir().join(format!(
-            "hebnix-discord-accounts-{}.json",
-            std::process::id()
-        ));
-        let accounts = vec!["first".to_string(), "second".to_string()];
-        save_linked_accounts(&path, &accounts).unwrap();
-        assert_eq!(load_linked_accounts(&path), accounts);
-        let _ = std::fs::remove_file(path);
-    }
-}

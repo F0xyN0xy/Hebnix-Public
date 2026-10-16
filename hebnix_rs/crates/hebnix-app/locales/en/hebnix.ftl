@@ -242,6 +242,7 @@ about-hebnix = Hebnix
 about-built-with-help-from-the-community = Built with help from the community
     Contributors:
     xplodingeggo
+    rlyvision
 statsapi-notice-set-20 = Set 20
 web-port-notice-set-49124 = Set 49124
 web-port-notice-dismiss = Dismiss
@@ -399,6 +400,7 @@ card-loading-image = Loading image...
 tab-restore-every-patched-decal = Restore every patched decal
 tab-retry-loading-catalog = Retry Loading Catalog
 tab-active-decal-patches = Active decal patches
+tab-no-active-decal-patches = No patched decals yet. Applied decals will appear here.
 tab-each-item-lists-api-decals-for = Each item lists API decals for its matching car. Patched targets stay locked until restored.
 tab-restore-every-patch-using-this-decal = Restore every patch using this decal before deleting it
 tab-legacy-this-will-restore-all-decals-to = This will restore ALL decals to their original state.
@@ -928,8 +930,3 @@ toast-filter-all = All plugins
 toast-sent-at = Sent at { $time }
 toast-clear = Clear all
 toast-empty = Nothing here yet. Plugins show up here when they send a toast.
-
-overlay-perf-tip-title = Overlay performance
-overlay-perf-tip-slow = If plugin overlays feel slow or laggy, raise the overlay refresh rate in Settings > System.
-overlay-perf-tip-choppy = If Rocket League feels choppy or stuttery while Hebnix is open, lower it instead.
-overlay-perf-tip-open-settings = Open Settings

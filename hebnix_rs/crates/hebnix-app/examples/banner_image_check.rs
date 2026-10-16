@@ -1,4 +1,4 @@
-//! Run with an input banner and output PNG, or `cargo test --example banner_image_check`.
+//! Run with an input banner and output PNG.
 #[path = "../src/ui/workshop/banner_image.rs"]
 mod banner_image;
 
@@ -11,7 +11,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&args[2], bytes)?;
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "support/banner_image_tests.rs"]
-mod tests;

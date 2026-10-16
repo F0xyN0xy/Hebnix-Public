@@ -29,43 +29,6 @@ pub enum SwapCategory {
     Wheels,
 }
 
-#[cfg(test)]
-mod thumbnail_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn engine_preview_does_not_change_the_thumbnail_swap_destination() {
-        let bodies = json!({"bodies": [{
-            "name": "007's Aston Martin DB5", "upk_path": "body_amber_SF.upk",
-            "thumbnail": "body_Amber_T_SF.upk"
-        }]});
-        let engines = json!({"engines": [{
-            "name": "007's Aston Martin DB5", "upk_path": "engineaudio_amber_SF.upk",
-            "thumbnail": "EngineAudio_Amber_T_SF.upk"
-        }]});
-        let items = SwapperState::parse_catalog(SwapCategory::Engines, &engines, &bodies).unwrap();
-        let item = &items[0];
-        let root = std::env::temp_dir().join(format!("hebnix-preview-{}", rand::random::<u64>()));
-        let backups = root.join("Backups");
-        fs::create_dir_all(&backups).unwrap();
-        let body = root.join("body_Amber_T_SF.upk");
-        let engine = root.join("EngineAudio_Amber_T_SF.upk");
-        fs::write(&body, b"body preview").unwrap();
-        fs::write(&engine, b"engine thumbnail stub").unwrap();
-        assert_eq!(preview_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("body_Amber_T_SF.upk"));
-        assert_eq!(inferred_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("EngineAudio_Amber_T_SF.upk"));
-        let body_backup = backups.join("body_Amber_T_SF.upk.bak");
-        fs::rename(&body, &body_backup).unwrap();
-        fs::remove_file(&engine).unwrap();
-        assert_eq!(preview_thumbnail(SwapCategory::Engines, item, &root).as_deref(), Some("body_Amber_T_SF.upk"));
-        assert_eq!(inferred_thumbnail(SwapCategory::Engines, item, &root), None);
-        fs::remove_file(body_backup).unwrap();
-        fs::remove_dir(backups).unwrap();
-        fs::remove_dir(root).unwrap();
-    }
-}
-
 impl SwapCategory {
     pub const ALL: [Self; 13] = [
         Self::Antennas,

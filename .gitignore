@@ -34,3 +34,5 @@ hebnix_rs/crates/hebnix-app/src/_color_scanner.rs
 
 # Headscale pre-auth key embedded in local builds, never commit
 /hs_key.txt
+/scripts
+/hebnix_rs/examples/plugins/party_invite_test
