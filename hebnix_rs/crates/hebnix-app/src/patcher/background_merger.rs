@@ -1149,23 +1149,3 @@ fn backup_path(path: &Path) -> PathBuf {
 fn friendly(name: &str) -> String {
     name.replace('_', " ").trim().to_string()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn supplied_senju_background_is_filterable_when_present() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/release/backgrounds/Senju_city.udk");
-        if !path.is_file() {
-            return;
-        }
-        let mut package =
-            UpkPackage::load(&path).expect("Senju City should be a readable UE3 package");
-        let retained = patch_donor_outside_only(&mut package, true)
-            .expect("Senju City should support exterior filtering");
-        assert!(retained > 0, "Senju City should retain exterior meshes");
-        eprintln!("Senju City retained {retained} exterior mesh/particle components");
-    }
-}

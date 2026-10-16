@@ -626,12 +626,12 @@ function plugin.on_tick()
         local bytes = hebnix.read_file(path)
         if not bytes then
             S.phase = "error"
-            S.err = "can't read Spotify login (is Spotify installed & logged in?)"
+            S.err = "can't read Spotify login (is Spotify installed & logged in?) make sure you didn't use qr code to log into your spotify account"
             return
         end
         local pem, rt, user = parse_dbrts(bytes)
         if not pem or not rt then
-            S.phase = "error"; S.err = "couldn't parse Spotify login"
+            S.phase = "error"; S.err = "couldn't parse Spotify login, make sure you didn't use qr code to log into your spotify account"
             return
         end
         S.pem, S.refresh_token, S.username = pem, rt, user

@@ -2111,26 +2111,28 @@ impl LiteApp {
                     t("settings-nav-action-button"),
                 );
             });
-        egui::ScrollArea::vertical()
-            .id_salt("lite_hebnix_settings_content")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.heading(match self.hebnix_settings_tab {
-                    HebnixSettingsTab::Interface => t("settings-heading-interface"),
-                    HebnixSettingsTab::Directories => t("settings-heading-directories"),
-                    HebnixSettingsTab::Discord => t("settings-heading-discord"),
-                    HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
-                    HebnixSettingsTab::System => t("settings-heading-system"),
+        crate::i18n::layout::subtab_content_frame().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("lite_hebnix_settings_content")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading(match self.hebnix_settings_tab {
+                        HebnixSettingsTab::Interface => t("settings-heading-interface"),
+                        HebnixSettingsTab::Directories => t("settings-heading-directories"),
+                        HebnixSettingsTab::Discord => t("settings-heading-discord"),
+                        HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
+                        HebnixSettingsTab::System => t("settings-heading-system"),
+                    });
+                    ui.add_space(8.0);
+                    match self.hebnix_settings_tab {
+                        HebnixSettingsTab::Interface => self.render_interface_settings(ui),
+                        HebnixSettingsTab::Directories => self.render_stats_settings(ui),
+                        HebnixSettingsTab::Discord => self.render_discord_settings(ui),
+                        HebnixSettingsTab::ActionButton => self.render_action_button_settings(ui),
+                        HebnixSettingsTab::System => self.render_system_settings(ui),
+                    }
                 });
-                ui.add_space(8.0);
-                match self.hebnix_settings_tab {
-                    HebnixSettingsTab::Interface => self.render_interface_settings(ui),
-                    HebnixSettingsTab::Directories => self.render_stats_settings(ui),
-                    HebnixSettingsTab::Discord => self.render_discord_settings(ui),
-                    HebnixSettingsTab::ActionButton => self.render_action_button_settings(ui),
-                    HebnixSettingsTab::System => self.render_system_settings(ui),
-                }
-            });
+        });
     }
 
     fn render_interface_settings(&mut self, ui: &mut egui::Ui) {
@@ -2582,18 +2584,20 @@ impl LiteApp {
                     });
             });
 
-        egui::ScrollArea::vertical()
-            .id_salt("lite_plugin_settings_view")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.heading(t_args("plugin-settings-display-name-configuration", &[("display_name", display_name.to_string().into())]));
-                ui.add_space(8.0);
-                if let Err(error) = self.plugin_mgr.render_settings(&selected, ui) {
-                    self.console.write(format!(
-                        "[Console] Error rendering settings for {display_name}: {error}"
-                    ));
-                }
-            });
+        crate::i18n::layout::subtab_content_frame().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("lite_plugin_settings_view")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.heading(t_args("plugin-settings-display-name-configuration", &[("display_name", display_name.to_string().into())]));
+                    ui.add_space(8.0);
+                    if let Err(error) = self.plugin_mgr.render_settings(&selected, ui) {
+                        self.console.write(format!(
+                            "[Console] Error rendering settings for {display_name}: {error}"
+                        ));
+                    }
+                });
+        });
     }
 
     fn render_about(&self, ui: &mut egui::Ui) {

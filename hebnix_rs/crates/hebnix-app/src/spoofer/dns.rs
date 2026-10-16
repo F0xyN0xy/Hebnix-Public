@@ -1,20 +1,84 @@
-//! A lookup straight at google/cloudflare over udp. has to skip the hosts file,
-//! we point the host at us and still need the real ip.
+//! Resolve through Windows' configured DNS while bypassing hosts and its
+//! contaminated cache. Public DNS is a fallback, not a startup requirement.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const SERVERS: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
 
 pub fn resolve_a(host: &str) -> Result<Ipv4Addr, String> {
+    type Cache = Mutex<HashMap<String, (Ipv4Addr, Instant)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((ip, expires)) = cache.lock().ok().and_then(|cache| cache.get(host).copied()) {
+        if Instant::now() < expires {
+            return Ok(ip);
+        }
+    }
+    let (ip, ttl) = resolve_uncached(host)?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(
+            host.to_string(),
+            (
+                ip,
+                Instant::now() + Duration::from_secs(u64::from(ttl.clamp(1, 60))),
+            ),
+        );
+    }
+    Ok(ip)
+}
+
+fn resolve_uncached(host: &str) -> Result<(Ipv4Addr, u32), String> {
+    if let Ok(answer) = windows_dns(host) {
+        return Ok(answer);
+    }
     let mut last = String::new();
     for server in SERVERS {
         match query(host, server) {
-            Ok(ip) => return Ok(ip),
+            Ok(ip) if !ip.is_loopback() && !ip.is_unspecified() => return Ok((ip, 60)),
+            Ok(_) => last = format!("{server}: DNS returned a local address for {host}"),
             Err(e) => last = format!("{server}: {e}"),
         }
     }
     Err(format!("no A record for {host} ({last})"))
+}
+
+fn windows_dns(host: &str) -> Result<(Ipv4Addr, u32), String> {
+    use windows::Win32::NetworkManagement::Dns::*;
+    let host: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
+    let mut records = std::ptr::null_mut();
+    let result = unsafe {
+        DnsQuery_W(
+            windows::core::PCWSTR(host.as_ptr()),
+            DNS_TYPE_A,
+            DNS_QUERY_NO_HOSTS_FILE | DNS_QUERY_BYPASS_CACHE,
+            None,
+            &mut records,
+            None,
+        )
+    };
+    if result.0 != 0 {
+        return Err(format!("Windows DNS: {}", result.0));
+    }
+    let mut record = records;
+    let mut answer = None;
+    while !record.is_null() {
+        let data = unsafe { &*record };
+        if data.wType == DNS_TYPE_A.0 {
+            let ip = Ipv4Addr::from(unsafe { data.Data.A.IpAddress }.to_ne_bytes());
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                answer = Some((ip, data.dwTtl));
+                break;
+            }
+        }
+        record = data.pNext;
+    }
+    unsafe {
+        DnsFree(Some(records.cast()), DnsFreeRecordList);
+    }
+    answer.ok_or_else(|| "Windows DNS returned no usable upstream A record".into())
 }
 
 fn query(host: &str, server: &str) -> Result<Ipv4Addr, String> {
@@ -23,10 +87,14 @@ fn query(host: &str, server: &str) -> Result<Ipv4Addr, String> {
         .map_err(|e| e.to_string())?;
 
     let req = build_query(host)?;
-    sock.send_to(&req, server).map_err(|e| e.to_string())?;
+    sock.connect(server).map_err(|e| e.to_string())?;
+    sock.send(&req).map_err(|e| e.to_string())?;
 
     let mut buf = [0u8; 1500];
-    let (n, _) = sock.recv_from(&mut buf).map_err(|e| e.to_string())?;
+    let n = sock.recv(&mut buf).map_err(|e| e.to_string())?;
+    if n < 12 || buf[..2] != req[..2] || buf[2] & 0x80 == 0 || buf[3] & 0x0f != 0 {
+        return Err("Invalid DNS reply".into());
+    }
     parse_answer(&buf[..n])
 }
 

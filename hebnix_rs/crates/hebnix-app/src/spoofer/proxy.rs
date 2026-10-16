@@ -69,6 +69,7 @@ pub fn serve_one(
 
     let mut body = Body::new(&ctype, std::mem::take(&mut bytes));
     body.request_path = Some(&req.path);
+    body.request_body = Some(&req.body);
     body.response_headers = headers.clone();
     for r in &matching {
         if r.rewrite(&mut body) {
@@ -104,7 +105,7 @@ pub fn serve_one(
         .map_err(|e| format!("write head: {e}"))?;
     tls.write_all(&body.bytes)
         .map_err(|e| format!("write body: {e}"))?;
-    let _ = tls.flush();
+    tls.flush().map_err(|e| format!("flush body: {e}"))?;
     Ok(())
 }
 
@@ -241,7 +242,10 @@ pub fn build_upstream_agent_pins(pins: HashMap<String, std::net::Ipv4Addr>) -> u
                 .find_map(|(host, ip)| name.eq_ignore_ascii_case(host).then_some(*ip))
             {
                 let port: u16 = port.parse().unwrap_or(443);
-                return Ok(vec![std::net::SocketAddr::from((ip, port))]);
+                // Warm listeners may live across multiple game sessions.
+                // Refresh upstream DNS without consulting our own redirects.
+                let refreshed = crate::spoofer::dns::resolve_a(name).unwrap_or(ip);
+                return Ok(vec![std::net::SocketAddr::from((refreshed, port))]);
             }
             use std::net::ToSocketAddrs;
             netloc.to_socket_addrs().map(|i| i.collect())

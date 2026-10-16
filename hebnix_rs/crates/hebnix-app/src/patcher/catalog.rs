@@ -169,7 +169,9 @@ impl PatchCatalog {
             })
             .map(|(i, _)| i)
             .collect();
-        let pages = matches.len().div_ceil(16).max(1);
+        // Keep the same items on the current page when responsive columns change.
+        let page_size = if self.kind == "decal" { 12 } else { 16 };
+        let pages = matches.len().div_ceil(page_size).max(1);
         self.page = self.page.min(pages - 1);
         ui.horizontal(|ui| {
             ui.label(if matches.is_empty() {
@@ -190,7 +192,11 @@ impl PatchCatalog {
                 self.page += 1;
             }
         });
-        let visible: Vec<_> = matches.into_iter().skip(self.page * 16).take(16).collect();
+        let visible: Vec<_> = matches
+            .into_iter()
+            .skip(self.page * page_size)
+            .take(page_size)
+            .collect();
         for &i in &visible {
             let banners: Vec<String> = catalog_images(self.kind, &self.items[i])
                 .into_iter()

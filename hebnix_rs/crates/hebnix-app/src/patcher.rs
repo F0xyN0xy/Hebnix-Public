@@ -14,6 +14,7 @@ pub mod cosmetic_thumbnail;
 pub mod cosmetic_upk;
 pub mod decal_patcher;
 pub mod heatseeker;
+pub mod menu_map;
 pub mod painted_swap;
 pub mod patch_core;
 pub mod rl_font;

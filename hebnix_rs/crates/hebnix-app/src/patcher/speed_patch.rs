@@ -250,18 +250,51 @@ pub fn apply(path: &Path, reference: Option<&Path>, multiplier: f32) -> Result<u
 
 /// Compact speed picker used on the Items page when the experiment is enabled.
 pub fn speed_slider(ui: &mut egui::Ui, speed: &mut f32) {
+    speed_slider_with_presets(ui, speed, true);
+}
+
+/// Decal cards keep three columns, so omit the optional preset buttons.
+pub fn compact_speed_slider(ui: &mut egui::Ui, speed: &mut f32) {
+    speed_slider_with_presets(ui, speed, false);
+}
+
+fn speed_slider_with_presets(ui: &mut egui::Ui, speed: &mut f32, allow_presets: bool) {
     ui.horizontal(|ui| {
         ui.label(t("speed-patch-multiplier"));
+        let spacing = ui.spacing();
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let text_width = |text: &str| {
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        };
+        // Reserve the widest value, so dragging to 20x cannot push the row out
+        // of its card. Presets are optional; the editable value stays visible.
+        let value_width =
+            (text_width("20.00x") + 2.0 * spacing.button_padding.x).max(spacing.interact_size.x);
+        let gap = spacing.item_spacing.x;
+        let presets_width =
+            text_width("1x") + text_width("5x") + 4.0 * spacing.button_padding.x + 2.0 * gap;
+        let available = ui.available_width();
+        let show_presets = allow_presets && available >= 72.0 + value_width + gap + presets_width;
+        ui.spacing_mut().slider_width =
+            (available - value_width - gap - if show_presets { presets_width } else { 0.0 })
+                .clamp(1.0, 90.0);
         ui.add(
             egui::Slider::new(speed, MIN_MULTIPLIER..=MAX_MULTIPLIER)
                 .suffix("x")
+                .min_decimals(1)
+                .max_decimals(2)
                 .step_by(0.25),
         );
-        if ui.small_button("1x").clicked() {
-            *speed = 1.0;
-        }
-        if ui.small_button("5x").clicked() {
-            *speed = 5.0;
+        if show_presets {
+            if ui.small_button("1x").clicked() {
+                *speed = 1.0;
+            }
+            if ui.small_button("5x").clicked() {
+                *speed = 5.0;
+            }
         }
     });
 }
@@ -273,7 +306,7 @@ enum Job {
 
 type JobResult = Result<String, String>;
 
-/// Experimental tab: the Items page switch plus a one-off package patcher.
+/// Items animation speed tab: the swapper switch plus a one-off package patcher.
 pub struct State {
     package: Option<PathBuf>,
     speed: f32,

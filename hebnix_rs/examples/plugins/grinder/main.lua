@@ -182,16 +182,35 @@ local function norm_platform(p)
     return nil
 end
 
+local function reset_identity()
+    S.username, S.account_id, S.primary_id, S.epic_id = nil, nil, nil, nil
+    S.platform, S.profile_platform = "unknown", nil
+    S.canonical_name, S.name_key = nil, nil
+    S.profile, S.profile_key = nil, nil
+    S.last_post = 0
+end
+
 local function try_identity()
+    if S.ident_key then
+        local info = hebnix.launch_log_result(S.ident_key)
+        if info == nil then S.ident_key = nil return end
+        if type(info) ~= "table" then return end
+        S.ident_key = nil
+        S.log_try = mono()
+        local sess = info.session
+        if type(sess) ~= "table" then return end
+        if sess.primary_id and S.primary_id and sess.primary_id ~= S.primary_id then reset_identity() end
+        if sess.username then S.username = sess.username end
+        if sess.primary_id then S.primary_id = sess.primary_id; parse_identity(sess.primary_id) end
+        local plat = norm_platform(sess.platform)
+        if plat then S.platform = plat end
+        if sess.epic_id and sess.epic_id ~= "" then S.epic_id = sess.epic_id end
+        return
+    end
+    if mono() - (S.log_try or -999) < 4 then return end
     S.log_try = mono()
-    local ok, info = pcall(hebnix.parse_launch_log, false)
-    if not ok or type(info) ~= "table" or type(info.session) ~= "table" then return end
-    local sess = info.session
-    if sess.username then S.username = sess.username end
-    if sess.primary_id then parse_identity(sess.primary_id) end
-    local plat = norm_platform(sess.platform)
-    if plat then S.platform = plat end
-    if sess.epic_id and sess.epic_id ~= "" then S.epic_id = sess.epic_id end
+    hebnix.clear_launch_log()
+    S.ident_key = hebnix.parse_launch_log_async(false)
 end
 
 function plugin.on_load()
@@ -225,13 +244,29 @@ function plugin.on_http_result(id, status, body)
         S.players = j.players
         S.error = nil
         S.updated_at = mono()
+        if type(j.notices) == "table" and hebnix.get_bool("grinder_notify_me", true) then
+            for _, n in ipairs(j.notices) do
+                if type(n.from) == "string" and n.from ~= "" then
+                    hebnix.toast(n.from .. " copied your username, watch out for their friend invite")
+                end
+            end
+        end
     else
         S.error = "bad response"
     end
 end
 
 function plugin.on_tick()
-    if not S.username and mono() - (S.log_try or -999) >= 4 then try_identity() end
+    if mono() - (S.proc_check or -999) >= 3 then
+        S.proc_check = mono()
+        local up = hebnix.process_running("RocketLeague.exe")
+        if up and not S.game_up then
+            reset_identity()
+            S.ident_until = mono() + 60
+        end
+        S.game_up = up
+    end
+    if not S.username or mono() < (S.ident_until or 0) or S.ident_key then try_identity() end
     if S.epic_id and not S.canonical_name and not S.name_key then
         S.name_key = hebnix.fetch_profile_async("epic", S.epic_id)
     end
@@ -270,7 +305,7 @@ function plugin.on_tick()
 
     local available = hebnix.get_bool("grinder_available", false)
     local open = hebnix.window.is_open()
-    local interval = open and 15 or (available and 90 or nil)
+    local interval = (open or available) and 15 or nil
     if interval and (S.last_post == 0 or mono() - S.last_post >= interval) then
         do_post()
     end
@@ -307,6 +342,7 @@ function plugin.on_window(ui)
 
     ui.separator()
     ui.checkbox("grinder_available", "List me as available")
+    ui.checkbox("grinder_notify_me", "Notify me when someone copies my name", true)
     local pubname = resolved_name()
     if pubname then
         ui.colored_label("#7cc242", "Others add you as:  " .. pubname)
@@ -382,7 +418,14 @@ function plugin.on_window(ui)
                 tier_badge(ui, tier)
                 div_stack(ui, tier, p.rank_div)
                 ui.colored_label("#eaeef2", name)
-                if ui.button("Copy name") then ui.copy_to_clipboard(name) end
+                if ui.button("Copy name") then
+                    ui.copy_to_clipboard(name)
+                    if p.ref and S.session_id then
+                        hebnix.http_request_async("grinder_notify", "POST", ENDPOINT,
+                            hebnix.json_encode({ id = S.session_id, notify = { target = p.ref, from_id = S.primary_id } }),
+                            { ["Content-Type"] = "application/json" })
+                    end
+                end
             end)
             local bits = { tostring(p.mode or "?"), string.upper(tostring(p.region or "?")),
                 (PLAT_LABEL[p.platform] or tostring(p.platform or "?")) }

@@ -290,7 +290,13 @@ pub fn text(hdc: HDC, x: i32, y: i32, s: &str, color: Rgba, size: i32, halign: &
     }
 }
 
-pub fn image(hdc: HDC, path: &str, x: i32, y: i32, w: i32, h: i32, opacity: f32) {
+/// false when the picture couldn't be loaded (yet), so nothing was drawn
+pub fn image(hdc: HDC, path: &str, x: i32, y: i32, w: i32, h: i32, opacity: f32) -> bool {
+    draw_image(hdc, path, x, y, w, h, opacity);
+    IMAGES.with(|m| m.borrow().contains_key(path))
+}
+
+fn draw_image(hdc: HDC, path: &str, x: i32, y: i32, w: i32, h: i32, opacity: f32) {
     IMAGES.with(|m| {
         let mut m = m.borrow_mut();
         if !m.contains_key(path) {
@@ -535,6 +541,11 @@ impl GdiOverlay {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
         }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.hwnd
+            .is_some_and(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() })
     }
 
     /// hide the overlay (game not focused / no overlay plugins)

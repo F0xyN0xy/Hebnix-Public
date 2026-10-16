@@ -189,6 +189,7 @@ about-built-with-help-from-the-community =
     Creato con l'aiuto della community
     Collaboratori:
     xplodingeggo
+    rlyvision
 statsapi-notice-set-20 = Imposta 20
 web-port-notice-set-49124 = Imposta 49124
 web-port-notice-dismiss = Chiudi

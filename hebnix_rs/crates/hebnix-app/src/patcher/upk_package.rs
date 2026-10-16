@@ -1070,9 +1070,17 @@ impl UpkPackage {
         if end > self.image.len() {
             return Err("Patch is outside UPK".into());
         }
-        if offset >= self.header.name_offset
-            && end <= self.header.name_offset + self.decrypted_header.len()
-        {
+        // The physical encrypted header includes a chunk table/padding past the
+        // virtual header boundary. Export bytes at those logical addresses are
+        // chunk data, not header bytes: writing them into decrypted_header can
+        // corrupt compression metadata instead of changing the actual object.
+        let logical_header_end = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.uncompressed_offset)
+            .min()
+            .unwrap_or(self.header.name_offset + self.decrypted_header.len());
+        if offset >= self.header.name_offset && end <= logical_header_end {
             self.image[offset..end].copy_from_slice(data);
             let rel = offset - self.header.name_offset;
             self.decrypted_header[rel..rel + data.len()].copy_from_slice(data);
@@ -1220,7 +1228,7 @@ impl UpkPackage {
         self.replace_export_payload(slot, &bytes)?;
         Ok(slot)
     }
-    fn repacked(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn repacked(&self) -> Result<Vec<u8>, String> {
         if self.chunks.is_empty() && (self.raw_dirty || self.header_dirty) {
             let mut output = self.image.clone();
             if self.header_dirty && self.key != [0; 32] {

@@ -191,13 +191,20 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// make it if missing, then trust it for this user. no admin needed.
 pub fn install(base_dir: &Path) -> Result<(), String> {
+    if is_current_installed(base_dir) {
+        return Ok(());
+    }
     ensure(base_dir)?;
     let der = der_path(base_dir);
     if !der.is_file() {
         return Err(format!("{} is missing", der.display()));
     }
     let _ = uninstall(); // kick out any older CA of ours first
-    certutil(&["-user", "-addstore", "-f", "root", &der.to_string_lossy()]).map(|_| ())
+    certutil(&["-user", "-addstore", "-f", "root", &der.to_string_lossy()])?;
+    if !is_current_installed(base_dir) {
+        return Err("Windows did not trust the Hebnix certificate after installation".into());
+    }
+    Ok(())
 }
 
 /// sha1 of the der, same as the cert thumbprint

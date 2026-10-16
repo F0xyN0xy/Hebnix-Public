@@ -2474,6 +2474,7 @@ dependencies = [
  "hmac",
  "httparse",
  "image",
+ "jpeg-decoder",
  "libloading 0.8.9",
  "mlua",
  "open",
@@ -2995,6 +2996,12 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"

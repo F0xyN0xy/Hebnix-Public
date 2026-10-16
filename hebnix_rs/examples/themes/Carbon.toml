@@ -1,0 +1,80 @@
+# Carbon — soot black, graphite, and brushed titanium.
+# Copy to your Hebnix themes/ folder and select Carbon in Settings > Theme.
+# Put Barlow-Medium.ttf in the adjacent fonts/ folder to use the chosen typeface.
+# If the font is absent, Hebnix uses its default font.
+
+base = "dark"
+font = "Barlow-Medium"
+
+[colors]
+accent = "#59534B"
+window_bg = "#101010"
+panel_bg = "#171717"
+widget_bg = "#242424"
+extreme_bg = "#090909"
+faint_bg = "#1C1C1C"
+code_bg = "#0D0D0D"
+text_edit_bg = "#0D0D0D"
+text = "#ECE9E3"
+weak_text = "#A8A49D"
+selection_text = "#FFF8ED"
+hyperlink = "#D2C3AA"
+warn = "#D9AB65"
+error = "#E58A7D"
+
+[style]
+window_corner_radius = 6
+menu_corner_radius = 4
+widget_corner_radius = 3
+window_stroke = "#363330"
+window_stroke_width = 1.0
+selection_stroke = "#FFF8ED"
+selection_stroke_width = 1.0
+item_spacing_x = 8.0
+item_spacing_y = 6.0
+button_padding_x = 10.0
+button_padding_y = 5.0
+interact_height = 26.0
+animation_time = 0.10
+button_frame = true
+collapsing_header_frame = false
+indent_has_left_vline = true
+striped = true
+slider_trailing_fill = true
+
+[widgets.noninteractive]
+bg_fill = "#1C1C1C"
+weak_bg_fill = "#1C1C1C"
+bg_stroke = "#363330"
+bg_stroke_width = 1.0
+fg_stroke = "#A8A49D"
+
+[widgets.inactive]
+bg_fill = "#242424"
+weak_bg_fill = "#242424"
+bg_stroke = "#48443E"
+bg_stroke_width = 1.0
+fg_stroke = "#CEC9C0"
+
+[widgets.hovered]
+bg_fill = "#35322D"
+weak_bg_fill = "#35322D"
+bg_stroke = "#A79C88"
+bg_stroke_width = 1.0
+fg_stroke = "#FFF8ED"
+expansion = 0.0
+
+[widgets.active]
+bg_fill = "#59534B"
+weak_bg_fill = "#59534B"
+bg_stroke = "#D2C3AA"
+bg_stroke_width = 1.0
+fg_stroke = "#FFF8ED"
+expansion = 0.0
+
+[widgets.open]
+bg_fill = "#2C2925"
+weak_bg_fill = "#2C2925"
+bg_stroke = "#847A6B"
+bg_stroke_width = 1.0
+fg_stroke = "#ECE9E3"

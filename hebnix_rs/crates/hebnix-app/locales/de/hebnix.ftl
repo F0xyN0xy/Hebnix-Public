@@ -206,6 +206,7 @@ about-built-with-help-from-the-community =
     Mit Hilfe der Community entwickelt
     Mitwirkende:
     xplodingeggo
+    rlyvision
 statsapi-notice-set-20 = 20 setzen
 web-port-notice-set-49124 = 49124 setzen
 web-port-notice-dismiss = Schließen

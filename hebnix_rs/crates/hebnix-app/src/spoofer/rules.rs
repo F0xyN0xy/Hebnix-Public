@@ -11,6 +11,7 @@ pub struct Body<'a> {
     /// Request path, when the response came through the HTTP proxy.  Rules must
     /// use this for endpoints which share a host with unrelated account APIs.
     pub request_path: Option<&'a str>,
+    pub request_body: Option<&'a [u8]>,
     pub bytes: Vec<u8>,
     pub set_headers: Vec<(String, String)>, // these replace whatevers already there
     pub response_headers: Vec<(String, String)>,
@@ -21,6 +22,7 @@ impl<'a> Body<'a> {
         Self {
             content_type,
             request_path: None,
+            request_body: None,
             bytes,
             set_headers: Vec::new(),
             response_headers: Vec::new(),
@@ -498,22 +500,15 @@ impl Rule for TitleRule {
 
 pub struct RankRule {
     pub spoofs: Arc<Mutex<HashMap<i32, (i32, f64)>>>,
-    route_item_spawner: Arc<AtomicBool>,
+    route_session: bool,
     announced: AtomicBool,
 }
 
 impl RankRule {
     pub fn new(spoofs: Arc<Mutex<HashMap<i32, (i32, f64)>>>) -> Self {
-        Self::with_item_spawner(spoofs, Arc::new(AtomicBool::new(false)))
-    }
-
-    pub fn with_item_spawner(
-        spoofs: Arc<Mutex<HashMap<i32, (i32, f64)>>>,
-        route_item_spawner: Arc<AtomicBool>,
-    ) -> Self {
         Self {
             spoofs,
-            route_item_spawner,
+            route_session: false,
             announced: AtomicBool::new(false),
         }
     }
@@ -537,7 +532,7 @@ impl Rule for RankRule {
         };
 
         let spoofs = self.spoofs.lock().unwrap().clone();
-        if spoofs.is_empty() && !self.route_item_spawner.load(Ordering::Relaxed) {
+        if spoofs.is_empty() && !self.route_session {
             return false;
         }
         // Send game RPC through the intercepted config host, then route those
@@ -705,17 +700,21 @@ pub struct EnabledRule {
     pub inner: Box<dyn Rule>,
     pub http: Arc<AtomicBool>,
     pub socket: Arc<AtomicBool>,
+    pub game: Arc<AtomicBool>,
 }
 impl Rule for EnabledRule {
     fn matches_host(&self, host: &str) -> bool {
         (self.http.load(Ordering::Relaxed) || self.socket.load(Ordering::Relaxed))
+            && self.game.load(Ordering::Acquire)
             && self.inner.matches_host(host)
     }
     fn strip_request_headers(&self) -> &[&str] {
         self.inner.strip_request_headers()
     }
     fn rewrite(&self, body: &mut Body) -> bool {
-        self.inner.rewrite(body)
+        (self.http.load(Ordering::Relaxed) || self.socket.load(Ordering::Relaxed))
+            && self.game.load(Ordering::Acquire)
+            && self.inner.rewrite(body)
     }
     fn announce(&self) -> Option<String> {
         self.inner.announce()
@@ -723,10 +722,20 @@ impl Rule for EnabledRule {
 }
 
 /// Route the original game authentication and WebSocket, with no data spoofs.
-pub struct RlApiRouteRule;
+pub struct RlApiRouteRule {
+    pub retained: Arc<AtomicBool>,
+    pub game: Arc<AtomicBool>,
+}
+impl RlApiRouteRule {
+    fn routing(&self) -> bool {
+        self.game.load(Ordering::Acquire)
+            && (hebnix_sdk::rlapi::session::shared_game_session().enabled()
+                || self.retained.load(Ordering::Acquire))
+    }
+}
 impl Rule for RlApiRouteRule {
     fn matches_host(&self, host: &str) -> bool {
-        hebnix_sdk::rlapi::session::shared_game_session().enabled()
+        self.routing()
             && (host.eq_ignore_ascii_case(TITLE_HOST)
                 || host.eq_ignore_ascii_case("api.rlpp.psynet.gg"))
     }
@@ -734,13 +743,11 @@ impl Rule for RlApiRouteRule {
         &["if-none-match", "if-modified-since"]
     }
     fn rewrite(&self, body: &mut Body) -> bool {
-        if !hebnix_sdk::rlapi::session::shared_game_session().enabled() {
+        if !self.routing() {
             return false;
         }
-        let route = RankRule::with_item_spawner(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AtomicBool::new(true)),
-        );
+        let mut route = RankRule::new(Arc::new(Mutex::new(HashMap::new())));
+        route.route_session = true;
         route.rewrite(body)
     }
 }
