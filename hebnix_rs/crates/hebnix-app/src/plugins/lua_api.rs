@@ -2882,14 +2882,17 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             })?,
         )?;
     }
+    // WebSocket Send (backward-compatible aliases)
     {
         let host = Rc::clone(&host);
-        hebnix.set(
-            "ws_send",
-            lua.create_function(move |_, (id, text): (String, String)| {
+        let send_socket = lua.create_function(
+            move |_, (id, text): (String, String)| {
                 Ok(ws_send_cmd(&host.slug, &id, WsCmd::Send(text)))
-            })?,
+            },
         )?;
+
+        hebnix.set("ws_send", send_socket.clone())?;
+        hebnix.set("ws_send_socket", send_socket)?;
     }
     // raw statsapi socket command, hebnix.stats_send("Name", {..})
     {
@@ -2959,6 +2962,17 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             mac.update(message.as_bytes().as_ref());
             let result = mac.finalize();
             Ok(hex::encode(result.into_bytes()))
+        })?,
+    )?;
+
+    hebnix.set(
+        "crypto_sha256_base64",
+        lua.create_function(|_, data: mlua::String| {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            use sha2::{Digest, Sha256};
+
+            let digest = Sha256::digest(data.as_bytes().as_ref());
+            Ok(STANDARD.encode(digest))
         })?,
     )?;
 
@@ -3925,6 +3939,42 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                 if committed {
                     host.store.borrow_mut().set_string(&key, &buf);
                 }
+                Ok(buf)
+            })?,
+        )?;
+    }
+    // Persisted password input: ui.password_input("key", "placeholder") -> string
+    {
+        let host = Rc::clone(&host);
+        ui.set(
+            "password_input",
+            lua.create_function(move |_, (key, placeholder): (String, Option<String>)| {
+                let mut buf = {
+                    let bufs = host.text_bufs.borrow();
+                    match bufs.get(&key) {
+                        Some(b) => b.clone(),
+                        None => host.store.borrow().get_string(&key, ""),
+                    }
+                };
+
+                let committed = with_current_ui(|ui| {
+                    let mut edit = egui::TextEdit::singleline(&mut buf).password(true);
+
+                    if let Some(ph) = &placeholder {
+                        edit = edit.hint_text(ph.clone());
+                    }
+
+                    let response = ui.add(edit);
+                    response.lost_focus()
+                })
+                .unwrap_or(false);
+
+                host.text_bufs.borrow_mut().insert(key.clone(), buf.clone());
+
+                if committed {
+                    host.store.borrow_mut().set_string(&key, &buf);
+                }
+
                 Ok(buf)
             })?,
         )?;
