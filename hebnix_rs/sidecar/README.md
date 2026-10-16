@@ -19,8 +19,7 @@ see and use, which is what Rocket League's `-multihome` flag needs.
 
 ## Rebuilding
 
-These are prebuilt and checked in (same convention as `steam_api64.dll` and
-`rlapi-bridge.exe`), so a normal `cargo build` doesn't need Go installed.
+These are prebuilt and checked in, so a normal `cargo build` doesn't need Go installed.
 To rebuild after bumping the pinned `tailscale.com` version:
 
 ```

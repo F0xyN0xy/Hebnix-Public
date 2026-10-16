@@ -6,6 +6,58 @@ use std::path::Path;
 
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Car-specific engine thumbnail packages often contain only a default asset
+/// with no image. Use the associated body's preview, without changing which
+/// engine package the swapper installs or restores.
+pub(crate) fn body_preview_for_engine(
+    name: &str,
+    upk: &str,
+    bodies: &serde_json::Value,
+) -> Option<String> {
+    let body_items = bodies.get("bodies")?.as_array()?;
+    let engine_key = upk.to_ascii_lowercase();
+    let engine_key = engine_key
+        .strip_prefix("engineaudio_")?
+        .strip_suffix("_sf.upk")?;
+    let engine_key = engine_key
+        .strip_suffix("_oe")
+        .or_else(|| engine_key.strip_suffix("_rev"))
+        .unwrap_or(engine_key);
+    let by_key: Vec<_> = body_items
+        .iter()
+        .filter(|body| {
+            body.get("upk_path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| {
+                    path.to_ascii_lowercase()
+                        .strip_prefix("body_")
+                        .and_then(|path| path.strip_suffix("_sf.upk"))
+                        == Some(engine_key)
+                })
+        })
+        .collect();
+    let matches = if by_key.len() == 1 {
+        by_key
+    } else {
+        body_items
+            .iter()
+            .filter(|body| {
+                body.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|body_name| body_name.eq_ignore_ascii_case(name))
+            })
+            .collect()
+    };
+    if matches.len() != 1 {
+        return None;
+    }
+    matches[0]
+        .get("thumbnail")?
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
 fn word(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
     let data = bytes.get(*at..*at + 4).ok_or("Truncated texture record")?;
     *at += 4;

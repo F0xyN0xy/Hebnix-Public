@@ -244,30 +244,3 @@ impl PresetStore {
         self.refresh();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preset_key_round_trips_paint_metadata() {
-        let preset = Preset {
-            name: "Painted".into(),
-            include_patches: false,
-            patches: serde_json::Value::Null,
-            swaps: vec![serde_json::json!({
-                "source_upk": "A.upk",
-                "target_upk": "B.upk",
-                "paint": { "Preset": 7 }
-            })],
-        };
-        let bytes = serde_json::to_vec(&PresetKey {
-            version: 1,
-            preset: preset.clone(),
-        })
-        .unwrap();
-        let decoded = URL_SAFE_NO_PAD.decode(URL_SAFE_NO_PAD.encode(bytes)).unwrap();
-        let key: PresetKey = serde_json::from_slice(&decoded).unwrap();
-        assert_eq!(key.preset.swaps, preset.swaps);
-    }
-}

@@ -285,13 +285,12 @@ enum Tab {
     Colours,
     Settings,
     Plugins,
-    Notifications,
-    RlApi,
+    Replays,
     About,
 }
 
 impl Tab {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::Console,
         Self::Workshop,
         Self::Spoofer,
@@ -299,8 +298,7 @@ impl Tab {
         Self::Patcher,
         Self::Settings,
         Self::Plugins,
-        Self::Notifications,
-        Self::RlApi,
+        Self::Replays,
         Self::About,
     ];
 
@@ -314,14 +312,13 @@ impl Tab {
             Self::Colours => t("tab-colours"),
             Self::Settings => t("tab-settings"),
             Self::Plugins => t("tab-plugins"),
-            Self::Notifications => t("tab-notifications"),
-            Self::RlApi => t("tab-rlapi"),
+            Self::Replays => t("tab-replays"),
             Self::About => t("tab-about"),
         }
     }
 
-    /// value stored in config.toml (`default_tab`). these are the original
-    /// english names so existing configs keep working, never translate them.
+    /// Stable English value stored in config.toml (`default_tab`), never translated.
+    /// Legacy names are handled by `from_config_key` so existing configs keep working.
     fn config_key(self) -> &'static str {
         match self {
             Self::Console => "Console",
@@ -331,13 +328,16 @@ impl Tab {
             Self::Colours => "Colours",
             Self::Settings => "Settings",
             Self::Plugins => "Plugins",
-            Self::Notifications => "Notifications",
-            Self::RlApi => "Experimental",
+            Self::Replays => "Replays",
             Self::About => "About",
         }
     }
 
     fn from_config_key(key: &str) -> Self {
+        // Preserve the saved default from before Experimental became Replays.
+        if key == "Experimental" {
+            return Self::Replays;
+        }
         Self::ALL
             .into_iter()
             .find(|tab| tab.config_key() == key)
@@ -349,12 +349,9 @@ impl Tab {
 enum ItemsMode {
     Swapper,
     Spawner,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpawnerSubTab {
-    Tutorial,
-    Category(crate::swapper::SwapCategory),
+    SpeedPatch,
+    WheelAlignment,
+    BallAppearance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,19 +359,15 @@ enum PatcherSubTab {
     Ball,
     BoostMeter,
     Decal,
+    Car,
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExperimentalSubTab {
-    RlApi,
+enum ReplaysSubTab {
     AutoUploadReplays,
-    BallAppearance,
-    CarPatcher,
-    WheelAlignment,
-    SpeedPatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,14 +443,6 @@ struct InstallModal {
     images: HashMap<String, ImageState>,
 }
 
-struct ReplayUploadStartPrompt {
-    issues: Vec<String>,
-    restart_required: bool,
-    needs_admin: bool,
-    needs_certificate: bool,
-    missing_api_key: bool,
-}
-
 pub struct HebnixApp {
     base_dir: PathBuf,
     themes_dir: PathBuf,
@@ -473,6 +458,8 @@ pub struct HebnixApp {
     stats_tx: crossbeam_channel::Sender<hebnix_sdk::stats::StatsEvent>,
     monitor: Monitor,
     discord_presence: crate::discord_presence::DiscordPresence,
+    chat_capture: Option<crate::multiplayer_lan::ChatCapture>,
+    egui_ctx: egui::Context,
     discord_link: crate::discord_link::DiscordLinkState,
     plugin_mgr: PluginManager,
     tray: Option<Tray>,
@@ -484,14 +471,12 @@ pub struct HebnixApp {
     hebnix_settings_tab: HebnixSettingsTab,
     spoofer_subtab: SpooferSubTab,
     patcher_subtab: PatcherSubTab,
-    experimental_subtab: ExperimentalSubTab,
+    replays_subtab: ReplaysSubTab,
     speed_patch: crate::speed_patch::State,
     console: ConsoleState,
     workshop: WorkshopState,
     rlapi_panel: crate::ui::rlapi::RlApiPanel,
     auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays,
-    replay_upload_start_prompt: Option<ReplayUploadStartPrompt>,
-    replay_upload_restart_after_capture: bool,
 
     hidden: bool,
     topmost: bool,
@@ -546,6 +531,7 @@ pub struct HebnixApp {
     update_downloading: bool,
     update_error: Option<String>,
     changelog_popup: Option<crate::update::ChangelogEntry>,
+    notification_popup: Option<crate::notifications::Notification>,
     epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     rl_launch_setup_open: bool,
@@ -554,8 +540,6 @@ pub struct HebnixApp {
 
     spoofer_mgr: Arc<SpooferManager>,
     spoofer_master: bool,
-    spoofer_http_proxy: bool,
-    spoofer_socket_proxy: bool,
     spoofer_username_enabled: bool,
     spoofer_username: String,
     spoofer_username_history: Vec<String>,
@@ -579,12 +563,8 @@ pub struct HebnixApp {
     spoofer_friends_enabled: bool,
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
-    item_spawner_enabled: bool,
+    item_clear_error: Option<String>,
     items_mode: ItemsMode,
-    spawn_restart_pending: bool,
-    spawner_subtab: SpawnerSubTab,
-    spawner_enable_prompt_open: bool,
-    spawner_admin_requested: bool,
 
     patcher_ball: crate::ball::PatcherState,
     patcher_boost: crate::boost_patcher::BoostPatcherState,
@@ -600,21 +580,6 @@ pub struct HebnixApp {
     owned_admin_requested: bool,
     owned_proxy_prompt_open: bool,
     presets: crate::presets::PresetStore,
-}
-
-fn clear_rl_cache(tx: &Sender<AppMsg>) {
-    match winutil::clear_rocket_league_web_cache() {
-        Ok(()) => {
-            let _ = tx.send(AppMsg::Log(
-                "[Spoofer] cleared Rocket League WebCache".into(),
-            ));
-        }
-        Err(error) => {
-            let _ = tx.send(AppMsg::Log(format!(
-                "[Spoofer] could not clear Rocket League WebCache: {error}"
-            )));
-        }
-    }
 }
 
 impl HebnixApp {
@@ -656,6 +621,11 @@ impl HebnixApp {
         let theme_options = theme::list_themes(&themes_dir);
 
         let (tx, rx) = crossbeam_channel::unbounded::<AppMsg>();
+        crate::notifications::check_on_start(
+            config.notification_id,
+            tx.clone(),
+            cc.egui_ctx.clone(),
+        );
 
         let show_changelog = base_dir.join(".first").exists();
         let launch_marker = base_dir.join(".launch");
@@ -730,6 +700,7 @@ impl HebnixApp {
             cc.egui_ctx.clone(),
         );
 
+        crate::screen::init(tx.clone());
         let mut plugin_mgr = PluginManager::new(plugin_dir.clone(), tx.clone(), APP_VERSION);
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
@@ -796,8 +767,6 @@ impl HebnixApp {
         let spoofer_mgr = Arc::new(SpooferManager::new(base_dir.clone(), tx.clone()));
 
         let mut spoofer_master = false;
-        let mut spoofer_http_proxy = false;
-        let mut spoofer_socket_proxy = false;
         let mut spoofer_username_enabled = false;
         let mut spoofer_username = "Hebnix".to_string();
         let mut spoofer_username_history = Vec::new();
@@ -815,14 +784,6 @@ impl HebnixApp {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                 spoofer_master = json
                     .get("spoofer_master")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                spoofer_http_proxy = json
-                    .get("spoofer_http_proxy")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                spoofer_socket_proxy = json
-                    .get("spoofer_socket_proxy")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 spoofer_username_enabled = json
@@ -954,14 +915,7 @@ impl HebnixApp {
         if spoofer::is_admin() && owned_restart_marker.is_file() {
             let _ = std::fs::remove_file(&owned_restart_marker);
             spoofer_master = true;
-            spoofer_http_proxy = true;
             swapper.set_owned_only(true);
-        }
-        let spawner_restart_marker = base_dir.join("enable_item_spawner.pending");
-        let enable_spawner_after_admin = spoofer::is_admin() && spawner_restart_marker.is_file();
-        if enable_spawner_after_admin {
-            let _ = std::fs::remove_file(&spawner_restart_marker);
-            spoofer_master = true;
         }
         let cert_installed = spoofer::ca::is_current_installed(&base_dir);
         let rl_launch_draft = config.rl_launch.clone();
@@ -987,6 +941,8 @@ impl HebnixApp {
             stats_tx,
             monitor,
             discord_presence,
+            chat_capture: None,
+            egui_ctx: cc.egui_ctx.clone(),
             discord_link: crate::discord_link::DiscordLinkState::new(&base_dir),
             plugin_mgr,
             tray,
@@ -997,14 +953,12 @@ impl HebnixApp {
             hebnix_settings_tab: HebnixSettingsTab::Interface,
             spoofer_subtab: SpooferSubTab::Settings,
             patcher_subtab: PatcherSubTab::Ball,
-            experimental_subtab: ExperimentalSubTab::BallAppearance,
+            replays_subtab: ReplaysSubTab::AutoUploadReplays,
             speed_patch: crate::speed_patch::State::default(),
             console: ConsoleState::default(),
             workshop,
             rlapi_panel: crate::ui::rlapi::RlApiPanel::default(),
             auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays::new(&base_dir),
-            replay_upload_start_prompt: None,
-            replay_upload_restart_after_capture: false,
             hidden,
             topmost: false,
             currently_connected: false,
@@ -1052,6 +1006,7 @@ impl HebnixApp {
             update_downloading: false,
             update_error: None,
             changelog_popup: None,
+            notification_popup: None,
             epic_repair: Default::default(),
             launch_path_notice: false,
             rl_launch_setup_open: false,
@@ -1059,8 +1014,6 @@ impl HebnixApp {
             rl_launch_shortcut_candidates: Vec::new(),
             spoofer_mgr,
             spoofer_master,
-            spoofer_http_proxy,
-            spoofer_socket_proxy,
             spoofer_username_enabled,
             spoofer_username,
             spoofer_username_history,
@@ -1081,17 +1034,12 @@ impl HebnixApp {
             spoofer_ranks,
             spoofer_cert_installed: cert_installed,
             spoofer_certificate_prompt_open: spoofer_master
-                && (spoofer_http_proxy || spoofer_socket_proxy)
                 && !cert_installed,
             spoofer_friends_enabled,
             spoofer_friends,
             friends_search: String::new(),
-            item_spawner_enabled: false,
+            item_clear_error: None,
             items_mode: ItemsMode::Swapper,
-            spawn_restart_pending: false,
-            spawner_subtab: SpawnerSubTab::Tutorial,
-            spawner_enable_prompt_open: false,
-            spawner_admin_requested: false,
             patcher_ball,
             patcher_boost,
             patcher_decal,
@@ -1114,16 +1062,73 @@ impl HebnixApp {
         app.plugin_mgr.shared.borrow_mut().is_gui_open = !hidden;
         app.refresh_stats_api_viewer();
         app.check_web_port();
+        app.sync_chat_capture();
 
         app.save_friends_internal();
         app.save_ranks_internal();
-        app.evaluate_proxies();
-        if enable_spawner_after_admin {
-            app.enable_item_spawner();
+        app.prompt_for_missing_spoofer_certificate();
+        if let Err(error) = app.spoofer_mgr.start_lifecycle_monitor() {
+            app.disable_certificate_features();
+            app.console.write(format!("[Spoofer] {error}"));
+        } else {
+            app.evaluate_proxies();
         }
         fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone());
 
         app
+    }
+
+    /// starts or stops the LAN chat capture to match the `chat_export` setting
+    fn sync_chat_capture(&mut self) {
+        if !self.config.settings.chat_export {
+            self.stop_chat_capture();
+            return;
+        }
+        if self.chat_capture.is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
+        match crate::multiplayer_lan::ChatCapture::start(move |message| {
+            let _ = tx.send(AppMsg::ChatMessage(message));
+            ctx.request_repaint();
+        }) {
+            Ok(capture) => self.chat_capture = Some(capture),
+            Err(error) => self.console.write(format!("[Chat] {error}")),
+        }
+    }
+
+    fn stop_chat_capture(&mut self) {
+        if let Some(capture) = self.chat_capture.take() {
+            capture.stop();
+        }
+    }
+
+    /// appends the message to chat_log.jsonl and hands it to the plugins
+    fn handle_chat_message(&mut self, message: &crate::multiplayer_lan::ChatMessage) {
+        use std::io::Write;
+        let line = match serde_json::to_string(message) {
+            Ok(line) => line,
+            Err(_) => return,
+        };
+        let logged = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.base_dir.join("chat_log.jsonl"))
+            .and_then(|mut file| writeln!(file, "{line}"));
+        if let Err(error) = logged {
+            self.console
+                .write(format!("[Chat] could not write chat_log.jsonl: {error}"));
+        }
+        self.plugin_mgr.dispatch_simple(
+            "ChatMessage",
+            serde_json::json!({
+                "sender": message.sender,
+                "text": message.text,
+                "time": message.time,
+                "counter": message.counter,
+            }),
+        );
     }
 
     fn save_config(&mut self) {
@@ -1138,8 +1143,6 @@ impl HebnixApp {
         }
         let json_obj = serde_json::json!({
             "spoofer_master": self.spoofer_master,
-            "spoofer_http_proxy": self.spoofer_http_proxy,
-            "spoofer_socket_proxy": self.spoofer_socket_proxy,
             "spoofer_username_enabled": self.spoofer_username_enabled,
             "spoofer_username": self.spoofer_username,
             "spoofer_username_history": self.spoofer_username_history,
@@ -1273,138 +1276,55 @@ impl HebnixApp {
         }
     }
 
-    fn replay_upload_start_requirements(&mut self) -> ReplayUploadStartPrompt {
-        let needs_admin = !spoofer::is_admin();
-        let needs_certificate = !spoofer::ca::is_current_installed(&self.base_dir);
-        self.spoofer_cert_installed = !needs_certificate;
-        let missing_api_key = self.config.replay_upload.api_key.trim().is_empty();
-        let session = hebnix_sdk::rlapi::session::shared_game_session();
-        let restart_required =
-            hebnix_sdk::process::is_rocket_league_running() && !session.has_connection();
-        let mut issues = Vec::new();
-        if missing_api_key {
-            issues.push("Enter a ballchasing.com API key.".to_string());
-        }
-        if needs_admin {
-            issues.push("Hebnix must be running as administrator.".to_string());
-        }
-        if needs_certificate {
-            issues.push("Install the Hebnix proxy certificate in Spoofer > Settings.".to_string());
-        }
-        if restart_required {
-            issues.push(
-                "Rocket League is open, but its PsyNet session was not captured. Enable capture and restart Rocket League."
-                    .to_string(),
-            );
-        }
-        ReplayUploadStartPrompt {
-            issues,
-            restart_required,
-            needs_admin,
-            needs_certificate,
-            missing_api_key,
-        }
-    }
-
-    fn request_replay_auto_upload_start(&mut self) {
-        let prompt = self.replay_upload_start_requirements();
-        if prompt.issues.is_empty() {
-            self.enable_replay_auto_upload();
-        } else {
-            self.replay_upload_start_prompt = Some(prompt);
-        }
-    }
-
-    fn enable_replay_auto_upload(&mut self) {
-        if self.auto_upload_replays.begin_start().is_err() {
-            return;
-        }
-        if self.config.replay_upload.api_key.trim().is_empty() {
-            self.auto_upload_replays.finish_start(&Err(
-                "Enter a ballchasing.com API key before starting.".to_string(),
-            ));
-            return;
-        }
-        if !spoofer::is_admin() {
-            self.auto_upload_replays.finish_start(&Err(
-                "Run Hebnix as administrator, then start auto upload.".to_string(),
-            ));
-            return;
-        }
-        let manager = Arc::clone(&self.spoofer_mgr);
-        let base_dir = self.base_dir.clone();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                if !spoofer::ca::is_current_installed(&base_dir) {
-                    return Err("Install the existing Hebnix certificate in Spoofer settings, then start auto upload.".into());
-                }
-                if !hebnix_sdk::process::is_rocket_league_running() {
-                    crate::winutil::clear_rocket_league_web_cache().map_err(|error| {
-                        format!("Could not refresh Rocket League's cached configuration: {error}")
-                    })?;
-                }
-                manager.enable_rlapi()
-            })();
-            let _ = tx.send(AppMsg::ReplayUploadCaptureReady(result));
-        });
-    }
-
     fn render_replay_auto_upload_tab(&mut self, ui: &mut egui::Ui) {
         let session = hebnix_sdk::rlapi::session::shared_game_session();
-        ui.horizontal(|ui| {
-            let running = self.auto_upload_replays.running();
-            if ui
-                .add_enabled(
-                    !self.auto_upload_replays.starting(),
-                    egui::Button::new(if running { "Stop" } else { "Start" }),
-                )
-                .clicked()
-            {
-                if running {
-                    self.auto_upload_replays.stop();
-                    self.spoofer_mgr.disable_rlapi();
-                } else {
-                    self.request_replay_auto_upload_start();
-                }
-            }
-            if self.auto_upload_replays.starting() {
-                ui.spinner();
-            }
-        });
-        ui.add_space(8.0);
+        let options_were_enabled = self.replay_options_enabled();
 
         let mut config_changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Provider:");
-            egui::ComboBox::from_id_salt("replay_upload_provider")
-                .selected_text("ballchasing.com")
-                .show_ui(ui, |ui| {
-                    config_changed |= ui
-                        .selectable_value(
-                            &mut self.config.replay_upload.provider,
-                            "ballchasing.com".to_string(),
-                            "ballchasing.com",
-                        )
-                        .changed();
-                });
+        config_changed |= ui
+            .checkbox(
+                &mut self.config.replay_upload.save_locally,
+                "Save replays locally",
+            )
+            .changed();
+        config_changed |= ui
+            .checkbox(
+                &mut self.config.replay_upload.upload_enabled,
+                "Upload to ballchasing.com",
+            )
+            .changed();
+        ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Provider:");
+                egui::ComboBox::from_id_salt("replay_upload_provider")
+                    .selected_text("ballchasing.com")
+                    .show_ui(ui, |ui| {
+                        config_changed |= ui
+                            .selectable_value(
+                                &mut self.config.replay_upload.provider,
+                                "ballchasing.com".to_string(),
+                                "ballchasing.com",
+                            )
+                            .changed();
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("API key:");
+                config_changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.config.replay_upload.api_key)
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    )
+                    .changed();
+            });
         });
-        ui.horizontal(|ui| {
-            ui.label("API key:");
-            config_changed |= ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.config.replay_upload.api_key)
-                        .password(true)
-                        .desired_width(360.0),
-                )
-                .changed();
-        });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Replay name:");
             config_changed |= ui
                 .add(
                     egui::TextEdit::singleline(&mut self.config.replay_upload.naming_template)
-                        .desired_width(520.0),
+                        .desired_width(ui.available_width()),
                 )
                 .changed();
         });
@@ -1415,27 +1335,29 @@ impl HebnixApp {
             .small()
             .weak(),
         );
-        ui.horizontal(|ui| {
-            ui.label("Visibility:");
-            egui::ComboBox::from_id_salt("replay_upload_visibility")
-                .selected_text(&self.config.replay_upload.visibility)
-                .show_ui(ui, |ui| {
-                    for visibility in ["private", "unlisted", "public"] {
-                        config_changed |= ui
-                            .selectable_value(
-                                &mut self.config.replay_upload.visibility,
-                                visibility.to_string(),
-                                visibility,
-                            )
-                            .changed();
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Group ID (optional):");
-            config_changed |= ui
-                .text_edit_singleline(&mut self.config.replay_upload.group_id)
-                .changed();
+        ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Visibility:");
+                egui::ComboBox::from_id_salt("replay_upload_visibility")
+                    .selected_text(&self.config.replay_upload.visibility)
+                    .show_ui(ui, |ui| {
+                        for visibility in ["private", "unlisted", "public"] {
+                            config_changed |= ui
+                                .selectable_value(
+                                    &mut self.config.replay_upload.visibility,
+                                    visibility.to_string(),
+                                    visibility,
+                                )
+                                .changed();
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Group ID (optional):");
+                config_changed |= ui
+                    .text_edit_singleline(&mut self.config.replay_upload.group_id)
+                    .changed();
+            });
         });
         config_changed |= ui
             .checkbox(
@@ -1445,9 +1367,21 @@ impl HebnixApp {
             .changed();
         if config_changed {
             self.save_config();
+            if !options_were_enabled && self.replay_options_enabled() {
+                self.prompt_for_missing_spoofer_certificate();
+            }
+            self.evaluate_proxies();
         }
         ui.separator();
-        self.auto_upload_replays.show(ui, &session.status());
+        if self.config.replay_upload.upload_enabled
+            && self.config.replay_upload.api_key.trim().is_empty()
+        {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Enter a ballchasing.com API key to upload replays.",
+            );
+        }
+        self.auto_upload_replays.show_status(ui, &session.status());
     }
     fn process_preset_operations(
         &mut self,
@@ -1857,7 +1791,7 @@ impl HebnixApp {
         );
 
         let mut active = HashMap::new();
-        if self.spoofer_master && self.spoofer_http_proxy && self.spoofer_friends_enabled {
+        if self.spoofer_master && self.spoofer_friends_enabled {
             for (id, state) in &self.spoofer_friends {
                 if state.enabled && !state.spoofed_name.trim().is_empty() {
                     active.insert(id.clone(), state.spoofed_name.clone());
@@ -1873,7 +1807,7 @@ impl HebnixApp {
 
     fn save_ranks_internal(&self) {
         let mut active = HashMap::new();
-        if self.spoofer_master && self.spoofer_http_proxy && self.spoofer_rank_enabled {
+        if self.spoofer_master && self.spoofer_rank_enabled {
             for (id, state) in &self.spoofer_ranks {
                 if state.enabled
                     && RANK_SPOOF_PLAYLISTS
@@ -1897,84 +1831,94 @@ impl HebnixApp {
         self.save_config();
     }
 
+    fn replay_options_enabled(&self) -> bool {
+        self.config.replay_upload.upload_enabled || self.config.replay_upload.save_locally
+    }
+
+    fn sync_proxy_consumers(&mut self) {
+        self.spoofer_mgr.configure(self.proxy_options());
+        let session = hebnix_sdk::rlapi::session::shared_game_session();
+        self.auto_upload_replays.sync(
+            self.replay_options_enabled() && !self.epic_repair.running,
+            self.spoofer_mgr.game_running(),
+            session.enabled(),
+        );
+    }
+
+    fn proxy_options(&self) -> spoofer::ProxyOptions {
+        if self.epic_repair.running {
+            return spoofer::ProxyOptions::default();
+        }
+        spoofer::ProxyOptions {
+            account: self.spoofer_master
+                && (self.spoofer_username_enabled || self.spoofer_friends_enabled),
+            psynet: self.spoofer_master
+                && (self.spoofer_title_enabled
+                    || self.spoofer_rank_enabled
+                    || self.swapper.owned_only()),
+            replays: self.replay_options_enabled(),
+        }
+    }
+
     fn evaluate_proxies(&mut self) {
-        let cache_cleared = false;
-
-        if !self.spoofer_master {
-            if self.item_spawner_enabled {
-                self.item_spawner_enabled = false;
-                self.spawn_restart_pending = false;
-                self.spawner_subtab = SpawnerSubTab::Tutorial;
-                let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
-                clear_rl_cache(&self.tx);
-            }
-            if self.spoofer_mgr.socket_running() {
-                self.spoofer_mgr.stop_socket();
-                clear_rl_cache(&self.tx);
-            }
-            if self.spoofer_mgr.http_running() {
-                self.spoofer_mgr.stop_http();
-            }
-            if let Err(error) = self.spoofer_mgr.reconcile_hosts() {
-                self.console
-                    .write(format!("[Spoofer] Hosts cleanup failed: {error}"));
-            }
-            return;
-        }
-
-        let needs_http = self.spoofer_http_proxy
-            && (self.spoofer_username_enabled
-                || self.spoofer_friends_enabled
-                || self.spoofer_rank_enabled
-                || self.item_spawner_enabled
-                || self.swapper.owned_only());
-        if needs_http && !self.spoofer_mgr.http_running() {
-            if let Err(e) = self.spoofer_mgr.start_http() {
-                self.console
-                    .write(format!("[Spoofer] Failed to start account proxy: {e}"));
+        self.spoofer_mgr
+            .set_username(if self.spoofer_master && self.spoofer_username_enabled {
+                &self.spoofer_username
             } else {
-                self.console.write("[Spoofer] Account proxy started.");
-            }
-        } else if !needs_http && self.spoofer_mgr.http_running() {
-            self.spoofer_mgr.stop_http();
-            self.console.write("[Spoofer] Account proxy stopped.");
-        }
-
-        // Rank spoofing uses the same hosts-backed config.psynet.gg reverse
-        // proxy as the C# implementation. PsyNet bypasses Windows' HTTP proxy
-        // on current clients, so this must not depend on the Title toggle.
-        let needs_socket = (self.spoofer_socket_proxy && self.spoofer_title_enabled)
-            || self.spoofer_rank_enabled
-            || self.item_spawner_enabled;
-        if needs_socket && !self.spoofer_mgr.socket_running() {
-            if let Err(e) = self.spoofer_mgr.start_socket() {
-                self.console
-                    .write(format!("[Spoofer] Failed to start PsyNet proxy: {e}"));
-            } else {
-                self.console.write("[Spoofer] PsyNet proxy started.");
-            }
-        } else if !needs_socket && self.spoofer_mgr.socket_running() {
-            self.spoofer_mgr.stop_socket();
-            self.console.write("[Spoofer] PsyNet proxy stopped.");
-            if !cache_cleared {
-                clear_rl_cache(&self.tx);
-            }
-        }
-
-        if let Err(error) = self.spoofer_mgr.reconcile_hosts() {
-            self.console
-                .write(format!("[Spoofer] Hosts reconciliation failed: {error}"));
-        }
+                ""
+            });
+        self.spoofer_mgr
+            .set_title_enabled(self.spoofer_master && self.spoofer_title_enabled);
         self.save_friends_internal();
         self.save_ranks_internal();
+        self.sync_proxy_consumers();
     }
 
     fn prompt_for_missing_spoofer_certificate(&mut self) {
         self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
         if self.spoofer_cert_installed {
+            self.spoofer_mgr.certificate_setup_ready();
             self.spoofer_certificate_prompt_open = false;
-        } else if self.spoofer_master && (self.spoofer_http_proxy || self.spoofer_socket_proxy) {
-            self.spoofer_certificate_prompt_open = true;
+        } else if spoofer::is_admin() && (self.spoofer_master || self.replay_options_enabled()) {
+            match spoofer::ca::install(&self.base_dir) {
+                Ok(()) => {
+                    self.spoofer_cert_installed = true;
+                    self.spoofer_mgr.certificate_setup_ready();
+                    self.spoofer_certificate_prompt_open = false;
+                    self.console
+                        .write("[Spoofer] Proxy certificate installed automatically.");
+                }
+                Err(error) => {
+                    self.console.write(format!(
+                        "[Spoofer] Automatic certificate install failed: {error}"
+                    ));
+                    self.spoofer_certificate_prompt_open = true;
+                }
+            }
+        }
+    }
+
+    fn disable_certificate_features(&mut self) {
+        self.spoofer_mgr.block_for_certificate_removal();
+        // Disable every consumer so removing trust cannot silently reinstall it.
+        self.spoofer_master = false;
+        self.spoofer_username_enabled = false;
+        self.spoofer_friends_enabled = false;
+        self.spoofer_rank_enabled = false;
+        self.spoofer_title_enabled = false;
+        self.config.replay_upload.upload_enabled = false;
+        self.config.replay_upload.save_locally = false;
+        self.spoofer_certificate_prompt_open = false;
+        self.owned_proxy_prompt_open = false;
+        self.swapper.set_owned_only(false);
+        self.auto_upload_replays.stop();
+        self.spoofer_mgr.set_title_enabled(false);
+        self.spoofer_mgr.set_username("");
+        self.save_friends_internal();
+        self.save_ranks_internal();
+        self.save_config();
+        if hebnix_sdk::process::is_rocket_league_running() {
+            self.console.write("[Spoofer] Proxy disabled. Restart Rocket League to discard its current cached local connection.");
         }
     }
 
@@ -2042,6 +1986,7 @@ impl HebnixApp {
             self.ws_stats.stop();
             self.monitor.stop();
             self.discord_presence.stop();
+            self.stop_chat_capture();
             self.tray = None;
             // Keep the proxy alive without leaving a transparent viewport on screen.
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -2049,15 +1994,13 @@ impl HebnixApp {
             return;
         }
 
-        if self.item_spawner_enabled {
-            self.disable_item_spawner();
-        }
         self.spoofer_mgr.shutdown();
         self.plugin_mgr.unload_all();
         self.stats.stop();
         self.ws_stats.stop();
         self.monitor.stop();
         self.discord_presence.stop();
+        self.stop_chat_capture();
         self.tray = None;
         // std::process::exit() terminates immediately without running Rust
         // destructors, so `impl Drop for HebnixApp` (which would otherwise
@@ -2076,6 +2019,11 @@ impl HebnixApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMsg::Log(s) => self.console.write(s),
+                AppMsg::SpooferCertificateLost => {
+                    self.disable_certificate_features();
+                    self.spoofer_cert_installed = false;
+                    self.console.write("[Spoofer] Certificate trust was removed; proxy features were turned off and redirects cleaned up.");
+                }
                 AppMsg::RlApiCaptureReady(result) => {
                     self.rlapi_panel.starting = false;
                     if let Err(error) = result {
@@ -2083,32 +2031,6 @@ impl HebnixApp {
                     }
                 }
                 AppMsg::RlApiResponse(result) => self.rlapi_panel.complete(result),
-                AppMsg::ReplayUploadCaptureReady(result) => {
-                    let capture_ready = result.is_ok();
-                    self.auto_upload_replays.finish_start(&result);
-                    if self.replay_upload_restart_after_capture {
-                        self.replay_upload_restart_after_capture = false;
-                        if capture_ready {
-                            let path = self.config.settings.rl_path.clone();
-                            if let Err(error) = crate::winutil::restart_rocket_league(
-                                &self.config.rl_launch,
-                                std::path::Path::new(&path),
-                            ) {
-                                self.auto_upload_replays.stop();
-                                self.spoofer_mgr.disable_rlapi();
-                                self.replay_upload_start_prompt = Some(ReplayUploadStartPrompt {
-                                    issues: vec![format!(
-                                        "RLAPI capture was enabled, but Rocket League could not be restarted: {error}"
-                                    )],
-                                    restart_required: false,
-                                    needs_admin: false,
-                                    needs_certificate: false,
-                                    missing_api_key: false,
-                                });
-                            }
-                        }
-                    }
-                }
                 AppMsg::ReplayUploadFinished(result) => {
                     let debug = self.config.replay_upload.debug_logging;
                     let message = if debug {
@@ -2116,6 +2038,10 @@ impl HebnixApp {
                             Ok(entry) if entry.duplicate => format!(
                                 "[Replay Upload] match {} already exists at {}",
                                 entry.match_guid, entry.location
+                            ),
+                            Ok(entry) if entry.replay_id.is_empty() => format!(
+                                "[Replays] saved match {} locally to {}",
+                                entry.match_guid, entry.local_path
                             ),
                             Ok(entry) => format!(
                                 "[Replay Upload] uploaded match {} to {}",
@@ -2182,9 +2108,9 @@ impl HebnixApp {
                     let launched = rl_open && !self.last_rl_open;
 
                     self.handle_rl_status(rl_open, api_open);
+                    self.sync_proxy_consumers();
 
                     if launched {
-                        self.spawn_restart_pending = false;
                         self.workshop.rocket_league_reopened();
                         self.check_statsapi_rate();
                         self.check_web_port();
@@ -2253,6 +2179,11 @@ impl HebnixApp {
                     if let Ok(Some(entry)) = result {
                         self.changelog_popup = Some(entry);
                         let _ = std::fs::remove_file(self.base_dir.join(".first"));
+                    }
+                }
+                AppMsg::NotificationFetched(notification) => {
+                    if notification.is_newer_than(self.config.notification_id) {
+                        self.notification_popup = Some(notification);
                     }
                 }
                 AppMsg::AppUpdateFailed { error } => {
@@ -2465,6 +2396,10 @@ impl HebnixApp {
                     let message = self.workshop.finish_background_changer(result);
                     self.console.write(message);
                 }
+                AppMsg::MenuMapDone(result) => {
+                    let message = self.workshop.finish_menu_map(result);
+                    self.console.write(message);
+                }
                 AppMsg::BackgroundChangerProgress(message) => {
                     let message = self.workshop.update_background_changer_progress(message);
                     self.console.write(message);
@@ -2611,6 +2546,10 @@ impl HebnixApp {
                         .on_http_result(&slug, &req_id, status, &body, &headers);
                     ctx.request_repaint();
                 }
+                AppMsg::ChatMessage(message) => {
+                    self.handle_chat_message(&message);
+                    ctx.request_repaint();
+                }
                 AppMsg::PluginWsOpen { slug, id } => {
                     self.plugin_mgr.on_ws_open(&slug, &id);
                     ctx.request_repaint();
@@ -2680,6 +2619,7 @@ impl HebnixApp {
     }
 
     fn handle_game_event(&mut self, event: hebnix_sdk::stats::StatsEvent, ctx: &egui::Context) {
+        self.sync_proxy_consumers();
         match event.event_type.as_str() {
             "UpdateState" => {
                 let entered_match = !self.in_match && !self.match_ended;
@@ -2713,6 +2653,8 @@ impl HebnixApp {
                 if let Some(message) = self.auto_upload_replays.submit_finished(
                     event.match_guid.as_deref(),
                     &self.config.replay_upload,
+                    std::path::Path::new(&self.config.settings.rl_path),
+                    &self.config.rl_launch,
                     self.tx.clone(),
                     ctx.clone(),
                 ) {
@@ -2728,6 +2670,8 @@ impl HebnixApp {
                 if let Some(message) = self.auto_upload_replays.submit_finished(
                     event.match_guid.as_deref(),
                     &self.config.replay_upload,
+                    std::path::Path::new(&self.config.settings.rl_path),
+                    &self.config.rl_launch,
                     self.tx.clone(),
                     ctx.clone(),
                 ) {
@@ -3391,7 +3335,7 @@ impl HebnixApp {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new())
+            .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("spoofer_settings_view")
@@ -3418,23 +3362,21 @@ impl HebnixApp {
                                 egui::RichText::new(t("spoofer-requires-admin-for-hosts-file-intercepti"))
                                     .color(egui::Color32::GRAY),
                             );
+                            ui.label(egui::RichText::new(t("spoofer-session-lifecycle")).color(egui::Color32::GRAY));
 
                             ui.add_space(10.0);
-                            ui.add_enabled_ui(self.spoofer_master, |ui| {
+                            ui.scope(|ui| {
+                                let options = self.proxy_options();
+                                let game_running = self.spoofer_mgr.game_running();
                                 ui.horizontal(|ui| {
-                                    if ui
-                                        .checkbox(&mut self.spoofer_http_proxy, t("spoofer-account-proxy"))
-                                        .changed()
-                                    {
-                                        self.prompt_for_missing_spoofer_certificate();
-                                        self.save_config();
-                                        self.evaluate_proxies();
-                                    }
+                                    ui.label(t("spoofer-account-proxy"));
                                     if self.spoofer_mgr.http_running() {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
                                             t("spoofer-running"),
                                         );
+                                    } else if options.account && !game_running {
+                                        ui.weak(t("spoofer-waiting-for-game"));
                                     } else {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(244, 113, 116),
@@ -3450,19 +3392,16 @@ impl HebnixApp {
                                 ui.add_space(8.0);
 
                                 ui.horizontal(|ui| {
-                                    if ui
-                                        .checkbox(&mut self.spoofer_socket_proxy, t("spoofer-psynet-proxy"))
-                                        .changed()
+                                    ui.label(t("spoofer-psynet-proxy"));
+                                    if self.spoofer_mgr.socket_running()
+                                        || hebnix_sdk::rlapi::session::shared_game_session().enabled()
                                     {
-                                        self.prompt_for_missing_spoofer_certificate();
-                                        self.save_config();
-                                        self.evaluate_proxies();
-                                    }
-                                    if self.spoofer_mgr.socket_running() {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
                                             t("spoofer-running"),
                                         );
+                                    } else if (options.psynet || options.replays) && !game_running {
+                                        ui.weak(t("spoofer-waiting-for-game"));
                                     } else {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(244, 113, 116),
@@ -3485,6 +3424,7 @@ impl HebnixApp {
                                         t("spoofer-installed"),
                                     );
                                     if ui.button(t("spoofer-remove")).clicked() {
+                                        self.disable_certificate_features();
                                         match spoofer::ca::uninstall() {
                                             Ok(()) => {
                                                 self.console
@@ -3493,7 +3433,6 @@ impl HebnixApp {
                                                     spoofer::ca::is_current_installed(
                                                         &self.base_dir,
                                                     );
-                                                self.prompt_for_missing_spoofer_certificate();
                                             }
                                             Err(e) => self.console.write(format!(
                                                 "[Spoofer] Certificate removal failed: {e}"
@@ -3533,7 +3472,7 @@ impl HebnixApp {
                             ui.heading(t("spoofer-name-title-spoofing"));
                             ui.add_space(8.0);
 
-                            ui.add_enabled_ui(self.spoofer_http_proxy, |ui| {
+                            ui.add_enabled_ui(self.spoofer_master, |ui| {
                                 ui.horizontal(|ui| {
                                     if ui
                                         .checkbox(
@@ -3568,7 +3507,7 @@ impl HebnixApp {
                                                 .take(spoofer::MAX_NAME_LENGTH)
                                                 .collect();
                                         }
-                                        self.spoofer_mgr.set_username(&self.spoofer_username);
+                                        self.spoofer_mgr.set_username(if self.spoofer_master && self.spoofer_username_enabled { &self.spoofer_username } else { "" });
                                     }
                                     if text_resp.lost_focus() {
                                         if self.spoofer_username_enabled {
@@ -3594,7 +3533,7 @@ impl HebnixApp {
                                             .clicked()
                                         {
                                             self.spoofer_username = name;
-                                            self.spoofer_mgr.set_username(&self.spoofer_username);
+                                            self.spoofer_mgr.set_username(if self.spoofer_master && self.spoofer_username_enabled { &self.spoofer_username } else { "" });
                                             self.remember_username_spoof();
                                             self.save_config();
                                         }
@@ -3925,7 +3864,7 @@ impl HebnixApp {
                                 if title_changed {
                                     self.spoofer_mgr.set_titles(self.spoofer_titles.clone());
                                     self.spoofer_mgr
-                                        .set_title_enabled(self.spoofer_title_enabled);
+                                        .set_title_enabled(self.spoofer_master && self.spoofer_title_enabled);
                                     self.save_config();
                                 }
                             });
@@ -3934,7 +3873,7 @@ impl HebnixApp {
                             ui.heading(t("spoofer-friend-spoofing"));
                             ui.add_space(8.0);
 
-                            ui.add_enabled_ui(self.spoofer_http_proxy, |ui| {
+                            ui.add_enabled_ui(self.spoofer_master, |ui| {
                                 ui.horizontal(|ui| {
                                     if ui
                                         .checkbox(
@@ -4065,7 +4004,7 @@ impl HebnixApp {
                             ui.heading(t("spoofer-rank-spoofing"));
                             ui.add_space(8.0);
 
-                            ui.add_enabled_ui(self.spoofer_http_proxy, |ui| {
+                            ui.add_enabled_ui(self.spoofer_master, |ui| {
                                 if ui
                                     .checkbox(
                                         &mut self.spoofer_rank_enabled,
@@ -4664,7 +4603,7 @@ impl HebnixApp {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new())
+            .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("hebnix_settings_view")
@@ -4689,13 +4628,11 @@ impl HebnixApp {
                                         t("settings-theme-label"),
                                         t("settings-opacity-label"),
                                         t("settings-toast-position-label"),
+                                        t("system-default-tab"),
                                     ],
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-keybind-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-keybind-label"));
                                     let display = if self.capturing_hotkey {
                                         "...".to_string()
                                     } else {
@@ -4723,10 +4660,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-language-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-language-label"));
                                     let mut chosen = self.config.settings.language.clone();
                                     let mut language_changed = false;
                                     let known = crate::i18n::available();
@@ -4765,10 +4699,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-theme-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
                                     let mut selected = self.config.settings.theme.clone();
                                     let mut changed = false;
                                     egui::ComboBox::from_id_salt("theme_select")
@@ -4807,10 +4738,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-opacity-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-opacity-label"));
                                     let slider = ui.add(
                                         egui::Slider::new(
                                             &mut self.config.settings.window_opacity,
@@ -4837,10 +4765,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-toast-position-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-toast-position-label"));
                                     let mut changed = false;
                                     egui::ComboBox::from_id_salt("toast_position_select")
                                         .selected_text(self.config.settings.toast_position.label())
@@ -4856,6 +4781,28 @@ impl HebnixApp {
                                             }
                                         });
                                     if changed {
+                                        self.save_config();
+                                    }
+                                });
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-default-tab"));
+                                    let mut selected =
+                                        Tab::from_config_key(&self.config.settings.default_tab);
+                                    egui::ComboBox::from_id_salt("default_tab")
+                                        .selected_text(selected.label())
+                                        .show_ui(ui, |ui| {
+                                            for tab in Tab::ALL {
+                                                ui.selectable_value(
+                                                    &mut selected,
+                                                    tab,
+                                                    tab.label(),
+                                                );
+                                            }
+                                        });
+                                    if self.config.settings.default_tab != selected.config_key() {
+                                        self.config.settings.default_tab =
+                                            selected.config_key().to_string();
                                         self.save_config();
                                     }
                                 });
@@ -4878,13 +4825,11 @@ impl HebnixApp {
                                         "PacketSendRate:".to_string(),
                                         "Port:".to_string(),
                                         "WebPort:".to_string(),
+                                        t("settings-replay-save-folder"),
                                     ],
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-rl-folder-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-rl-folder-label"));
                                     ui.add_enabled(
                                         false,
                                         egui::TextEdit::singleline(
@@ -4909,10 +4854,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("settings-statsapi-ini-label")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-statsapi-ini-label"));
                                     ui.add_enabled(
                                         false,
                                         egui::TextEdit::singleline(
@@ -4941,10 +4883,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("hebnix-settings-packetsendrate")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-packetsendrate"));
                                     let resp = ui.add(
                                         egui::TextEdit::singleline(&mut self.packet_rate_edit)
                                             .hint_text(t("settings-not-found"))
@@ -4980,10 +4919,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("hebnix-settings-port")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-port"));
                                     let resp = ui.add(
                                         egui::TextEdit::singleline(&mut self.port_edit)
                                             .hint_text(t("settings-not-found"))
@@ -5023,10 +4959,7 @@ impl HebnixApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("hebnix-settings-webport")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-webport"));
                                     let resp = ui.add(
                                         egui::TextEdit::singleline(&mut self.web_port_edit)
                                             .hint_text(t("settings-not-found"))
@@ -5070,6 +5003,36 @@ impl HebnixApp {
                                         .size(11.0)
                                         .color(egui::Color32::GRAY),
                                 );
+
+                                ui.add_space(8.0);
+                                let replay_folder = crate::auto_upload_replays::configured_replay_directory(
+                                    &self.config.replay_upload,
+                                    std::path::Path::new(&self.config.settings.rl_path),
+                                    &self.config.rl_launch,
+                                );
+                                ui.horizontal(|ui| {
+                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-replay-save-folder"));
+                                    let mut display = replay_folder.as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|error| error.clone());
+                                    ui.add_enabled(false, egui::TextEdit::singleline(&mut display).desired_width(480.0));
+                                    if ui.button(t("btn-browse")).clicked() {
+                                        let mut dialog = rfd::FileDialog::new();
+                                        if let Ok(path) = &replay_folder {
+                                            dialog = dialog.set_directory(path);
+                                        }
+                                        if let Some(folder) = dialog.pick_folder() {
+                                            self.config.replay_upload.save_directory = folder.to_string_lossy().into_owned();
+                                            self.save_config();
+                                        }
+                                    }
+                                    if !self.config.replay_upload.save_directory.is_empty()
+                                        && ui.button(t("btn-reset")).clicked()
+                                    {
+                                        self.config.replay_upload.save_directory.clear();
+                                        self.save_config();
+                                    }
+                                });
 
                                 ui.add_space(12.0);
                                 ui.separator();
@@ -5259,13 +5222,12 @@ impl HebnixApp {
                                         t("system-limit-hotkey"),
                                         t("system-statsapi-rate"),
                                         t("system-default-tab"),
+                                        "Export LAN Chat:".to_string(),
+                                        "Overlay refresh rate:".to_string(),
                                     ],
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-start-with-windows")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-start-with-windows"));
                                     if ui.checkbox(&mut self.startup_enabled, "").changed() {
                                         if let Err(e) =
                                             winutil::set_startup_enabled(self.startup_enabled)
@@ -5282,10 +5244,7 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-start-in-tray")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-start-in-tray"));
                                     if ui
                                         .checkbox(&mut self.config.settings.start_in_tray, "")
                                         .changed()
@@ -5294,10 +5253,7 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-close-to-tray")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-close-to-tray"));
                                     if ui
                                         .checkbox(&mut self.config.settings.close_to_tray, "")
                                         .changed()
@@ -5306,10 +5262,19 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-p2p")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, "Export LAN Chat:");
+                                    let response = ui
+                                        .checkbox(&mut self.config.settings.chat_export, "")
+                                        .on_hover_text(
+                                            "Reads text chat out of LAN match traffic (port 7777), writes it to chat_log.jsonl and sends plugins a ChatMessage event. Needs Hebnix to run as administrator (WinDivert). Quick chats are not included.",
+                                        );
+                                    if response.changed() {
+                                        self.sync_chat_capture();
+                                        self.save_config();
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-p2p"));
                                     if ui
                                         .checkbox(&mut self.config.settings.p2p_file_sharing, "")
                                         .changed()
@@ -5325,10 +5290,7 @@ impl HebnixApp {
                                         .color(egui::Color32::GRAY),
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-suppress-left")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-suppress-left"));
                                     if ui
                                         .checkbox(
                                             &mut self.config.settings.suppress_left_alerts,
@@ -5340,10 +5302,7 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-fullscreen-warning")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-fullscreen-warning"));
                                     let mut show =
                                         !self.config.settings.suppress_fullscreen_warning;
                                     if ui.checkbox(&mut show, "").changed() {
@@ -5360,10 +5319,7 @@ impl HebnixApp {
                                         .color(egui::Color32::GRAY),
                                 );
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-allow-draw-focus")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-allow-draw-focus"));
                                     if ui
                                         .checkbox(
                                             &mut self.config.settings.allow_draw_on_hebnix_focus,
@@ -5375,10 +5331,7 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-limit-hotkey")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-limit-hotkey"));
                                     if ui
                                         .checkbox(
                                             &mut self
@@ -5393,10 +5346,7 @@ impl HebnixApp {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-statsapi-rate")),
-                                    );
+                                    crate::i18n::layout::settings_label(ui, label_w, t("system-statsapi-rate"));
                                     let mut show =
                                         !self.config.settings.suppress_statsapi_rate_warning;
                                     if ui.checkbox(&mut show, "").changed() {
@@ -5422,28 +5372,20 @@ impl HebnixApp {
                                         self.spoofer_mgr.shutdown();
                                     }
                                 }
-                                ui.add_space(8.0);
                                 ui.horizontal(|ui| {
-                                    ui.add_sized(
-                                        [label_w, 20.0],
-                                        egui::Label::new(t("system-default-tab")),
-                                    );
-                                    let mut selected =
-                                        Tab::from_config_key(&self.config.settings.default_tab);
-                                    egui::ComboBox::from_id_salt("default_tab")
-                                        .selected_text(selected.label())
-                                        .show_ui(ui, |ui| {
-                                            for tab in Tab::ALL {
-                                                ui.selectable_value(
-                                                    &mut selected,
-                                                    tab,
-                                                    tab.label(),
-                                                );
-                                            }
-                                        });
-                                    if self.config.settings.default_tab != selected.config_key() {
-                                        self.config.settings.default_tab =
-                                            selected.config_key().to_string();
+                                    crate::i18n::layout::settings_label(ui, label_w, "Overlay refresh rate:");
+                                    let slider = ui
+                                        .add(
+                                            egui::Slider::new(
+                                                &mut self.config.settings.overlay_refresh_fps,
+                                                20..=60,
+                                            )
+                                            .suffix(" fps"),
+                                        )
+                                        .on_hover_text(
+                                            "How often the overlay and plugins update while Rocket League is open. Lower it to use less CPU on slower PCs, higher is smoother.",
+                                        );
+                                    if slider.drag_stopped() || slider.lost_focus() {
                                         self.save_config();
                                     }
                                 });
@@ -5510,7 +5452,7 @@ impl HebnixApp {
 
         if with_settings.is_empty() {
             ui.add_space(50.0);
-            ui.vertical_centered(|ui| {
+            ui.vertical(|ui| {
                 ui.label(t("plugin-settings-none"));
                 ui.add_space(8.0);
                 if ui.button(t("plugin-settings-go")).clicked() {
@@ -5553,7 +5495,7 @@ impl HebnixApp {
             .unwrap_or_default();
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new())
+            .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("plugin_settings_view")
@@ -5722,101 +5664,50 @@ impl HebnixApp {
         }
     }
 
-    fn disable_item_spawner(&mut self) {
-        self.item_spawner_enabled = false;
-        self.spawn_restart_pending = false;
-        self.spawner_subtab = SpawnerSubTab::Tutorial;
-        let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
-        self.evaluate_proxies();
-        clear_rl_cache(&self.tx);
-        if self.spoofer_mgr.http_running() || self.spoofer_mgr.socket_running() {
-            self.console.write(
-                "[Item Spawner] Disabled. Hosts redirects remain for other enabled Spoofer features."
-            );
-        } else {
-            match crate::spoofer::hosts::clear() {
-                Ok(()) => {
-                    crate::spoofer::hosts::flush_dns();
-                    self.console.write(
-                        "[Item Spawner] Disabled. Hebnix hosts redirects removed and DNS flushed.",
-                    );
-                }
-                Err(error) => self.console.write(format!(
-                    "[Item Spawner] Disabled, but hosts cleanup failed: {error}"
-                )),
+    fn check_item_clear(&mut self) {
+        match self.spoofer_mgr.finish_item_clear() {
+            Ok(true) => {
+                self.item_clear_error = None;
+                self.console.write(&format!("[Items] {}", self.spoofer_mgr.item_status().text));
             }
-        }
-    }
-
-    fn enable_item_spawner(&mut self) {
-        if hebnix_sdk::process::is_rocket_league_running() {
-            self.console
-                .write("[Item Spawner] Close Rocket League before enabling Item Spawner.");
-            return;
-        }
-        if !spoofer::is_admin() {
-            self.spawner_admin_requested = true;
-            self.admin_prompt_open = true;
-            return;
-        }
-        self.spoofer_master = true;
-        self.save_config();
-        match self.spoofer_mgr.set_item_spawner_enabled(true) {
-            Ok(()) => {
-                self.item_spawner_enabled = true;
-                self.evaluate_proxies();
-                if self.spoofer_mgr.socket_running() {
-                    self.spawn_restart_pending = true;
-                    self.console
-                        .write("[Item Spawner] Enabled. Start Rocket League to use Item Spawner.");
-                } else {
-                    self.disable_item_spawner();
-                    self.console.write("[Item Spawner] Could not start the PsyNet proxy. Check the Spoofer settings and certificate.");
-                }
+            Ok(false) => {
+                self.item_clear_error = None;
             }
             Err(error) => {
-                self.item_spawner_enabled = false;
-                self.console
-                    .write(format!("[Item Spawner] Could not enable: {error}"));
+                self.item_clear_error =
+                    Some(format!("Clear incomplete: {error}. Check Again or Cancel."));
             }
         }
     }
 
-    fn render_spawner_enable_prompt(&mut self, ctx: &egui::Context) {
-        if !self.spawner_enable_prompt_open {
+    fn render_item_clear_prompt(&mut self, ctx: &egui::Context) {
+        if !self.spoofer_mgr.item_status().clearing {
             return;
         }
-        let mut enable = false;
+        let mut check = false;
         let mut cancel = false;
-        egui::Window::new(t("spawner-enable-prompt-read-the-item-spawner-tutorial"))
-            .id(egui::Id::new(
-                "spawner-enable-prompt-read-the-item-spawner-tutorial",
-            ))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(t(
-                    "spawner-enable-prompt-read-the-tutorial-tab-before-enabling",
-                ));
-                ui.label(t(
-                    "spawner-enable-prompt-rocket-league-must-be-closed-first",
-                ));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button(t("spawner-enable-prompt-continue")).clicked() {
-                        enable = true;
-                    }
-                    if ui.button(t("spawner-enable-prompt-cancel")).clicked() {
-                        cancel = true;
-                    }
-                });
+        egui::Modal::new(egui::Id::new("clear_hebnix_items")).show(ctx, |ui| {
+            ui.heading("Clear Items");
+            ui.label("Removes tracked instances from the most recently saved RL account's inventory and equipped loadouts, including rotating save copies. Original saves are backed up before editing.");
+            ui.label("Close Rocket League and Item Spawner to remove tracked items. Your normal inventory will not be removed.");
+            ui.weak(self.spoofer_mgr.item_status().text);
+            if let Some(error) = &self.item_clear_error { ui.label(error); }
+            ui.horizontal(|ui| {
+                check = ui.button("Check Again").clicked();
+                cancel = ui.add_enabled(self.spoofer_mgr.item_status().can_cancel, egui::Button::new("Cancel")).clicked();
             });
-        if enable {
-            self.spawner_enable_prompt_open = false;
-            self.enable_item_spawner();
-        } else if cancel {
-            self.spawner_enable_prompt_open = false;
+        });
+        if check {
+            self.check_item_clear();
+        }
+        if cancel {
+            match self.spoofer_mgr.cancel_item_clear() {
+                Ok(()) => self.item_clear_error = None,
+                Err(error) => {
+                    self.item_clear_error =
+                        Some(format!("Could not cancel durably: {error}. Retry Cancel."))
+                }
+            }
         }
     }
 
@@ -5833,9 +5724,7 @@ impl HebnixApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(if self.spawner_admin_requested {
-                    t("admin-prompt-item-spawner-needs-administrator-access")
-                } else if self.owned_admin_requested {
+                ui.label(if self.owned_admin_requested {
                     t("admin-prompt-owned-filter-needs-proxy")
                 } else {
                     t("admin-prompt-this-action-requires-hebnix-to-be")
@@ -5854,9 +5743,6 @@ impl HebnixApp {
         if ok {
             self.admin_prompt_open = false;
             self.spoofer_master = true;
-            if self.spawner_admin_requested {
-                let _ = std::fs::write(self.base_dir.join("enable_item_spawner.pending"), b"1");
-            }
             if self.owned_admin_requested {
                 let _ = std::fs::write(
                     self.base_dir.join("enable_owned_replacements.pending"),
@@ -5870,92 +5756,11 @@ impl HebnixApp {
                 std::process::exit(0);
             }
             self.spoofer_master = false;
-            let _ = std::fs::remove_file(self.base_dir.join("enable_item_spawner.pending"));
-            self.spawner_admin_requested = false;
-            self.disable_item_spawner();
             self.save_config();
             self.console.write("[Spoofer] Couldn't relaunch as admin.");
         } else if cancel {
             self.admin_prompt_open = false;
             self.owned_admin_requested = false;
-            self.spawner_admin_requested = false;
-            self.disable_item_spawner();
-            self.console
-                .write("[Item Spawner] Disabled because Administrator access was declined.");
-        }
-    }
-
-    fn render_replay_upload_start_prompt(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.replay_upload_start_prompt.as_ref() else {
-            return;
-        };
-        let can_enable_and_restart = prompt.restart_required
-            && !prompt.needs_admin
-            && !prompt.needs_certificate
-            && !prompt.missing_api_key;
-        let needs_admin = prompt.needs_admin;
-        let needs_certificate = prompt.needs_certificate;
-        let issues = prompt.issues.clone();
-        let mut enable_and_restart = false;
-        let mut relaunch_admin = false;
-        let mut open_spoofer = false;
-        let mut close = false;
-
-        egui::Window::new("Auto Upload Replays requirements")
-            .id(egui::Id::new("replay-upload-start-requirements"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("Auto Upload Replays cannot start yet:");
-                ui.add_space(4.0);
-                for issue in &issues {
-                    ui.label(format!("• {issue}"));
-                }
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(
-                        "The PsyNet capture proxy is enabled automatically; the HTTP Proxy toggle is not required.",
-                    )
-                    .small()
-                    .weak(),
-                );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if can_enable_and_restart
-                        && ui.button("Enable and restart Rocket League").clicked()
-                    {
-                        enable_and_restart = true;
-                    }
-                    if needs_admin && ui.button("Restart Hebnix as administrator").clicked() {
-                        relaunch_admin = true;
-                    }
-                    if needs_certificate && ui.button("Open Spoofer settings").clicked() {
-                        open_spoofer = true;
-                    }
-                    if ui.button("Close").clicked() {
-                        close = true;
-                    }
-                });
-            });
-
-        if enable_and_restart {
-            self.replay_upload_start_prompt = None;
-            self.replay_upload_restart_after_capture = true;
-            self.enable_replay_auto_upload();
-        } else if relaunch_admin {
-            self.replay_upload_start_prompt = None;
-            if spoofer::spawn_elevated_relaunch() {
-                self.spoofer_mgr.shutdown();
-                self.workshop.suspend_multiplayer();
-                std::process::exit(0);
-            }
-        } else if open_spoofer {
-            self.replay_upload_start_prompt = None;
-            self.tab = Tab::Spoofer;
-            self.spoofer_subtab = SpooferSubTab::Settings;
-        } else if close {
-            self.replay_upload_start_prompt = None;
         }
     }
 
@@ -6140,13 +5945,13 @@ impl HebnixApp {
                     }
                 }
             }
+            self.spoofer_mgr.certificate_setup_ready();
             self.spoofer_master = true;
-            self.spoofer_http_proxy = true;
             self.swapper.set_owned_only(true);
             self.save_config();
             self.evaluate_proxies();
             self.console.write(
-                "[Swapper] Owned-item capture enabled. Open or restart Rocket League to refresh the catalog.",
+                "[Swapper] Owned-item capture enabled. The proxy runs while Rocket League is open and captures its next PsyNet login.",
             );
         } else if cancel {
             self.owned_proxy_prompt_open = false;
@@ -6183,6 +5988,7 @@ impl HebnixApp {
                 Ok(()) => {
                     self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
                     if self.spoofer_cert_installed {
+                        self.spoofer_mgr.certificate_setup_ready();
                         self.spoofer_certificate_prompt_open = false;
                         self.console.write("[Spoofer] Certificate installed.");
                         self.evaluate_proxies();
@@ -6300,6 +6106,52 @@ impl HebnixApp {
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
             self.changelog_popup = None;
+        }
+    }
+
+    fn render_notification_popup(&mut self, ctx: &egui::Context) {
+        let Some(notification) = self.notification_popup.clone() else {
+            return;
+        };
+        let mut dismissed = false;
+        let id = egui::Id::new("web_notification");
+        egui::Modal::new(id).show(ctx, |ui| {
+            ui.set_width(440.0_f32.min((ctx.content_rect().width() - 48.0).max(120.0)));
+            ui.horizontal(|ui| {
+                ui.heading("Notification");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    dismissed |= ui.button("×").on_hover_text("Dismiss").clicked();
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height((ctx.content_rect().height() * 0.6).max(80.0))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(&notification.message).wrap());
+                });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if let Some(url) = notification.link_url() {
+                    let text = notification
+                        .link_text
+                        .as_deref()
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or("Open link");
+                    if ui.button(text).clicked() {
+                        let _ = open::that(url.as_str());
+                    }
+                }
+                dismissed |= ui.button("Dismiss").clicked();
+            });
+        });
+        let layer = egui::LayerId::new(egui::Order::Foreground, id);
+        ctx.move_to_top(layer);
+        ctx.memory_mut(|memory| memory.set_modal_layer(layer));
+        // Ignore backdrop clicks/Escape: the announcement stays until explicitly closed.
+        if dismissed {
+            self.config.notification_id = self.config.notification_id.max(notification.id);
+            self.save_config();
+            self.notification_popup = None;
         }
     }
 
@@ -7278,13 +7130,11 @@ impl Drop for HebnixApp {
         if !crate::watchdog::has_live_handoff()
             && !crate::watchdog::handoff_live_spoofer(Arc::clone(&self.spoofer_mgr))
         {
-            if self.item_spawner_enabled {
-                self.disable_item_spawner();
-            }
             self.spoofer_mgr.shutdown();
         }
         self.workshop.suspend_multiplayer();
         self.discord_presence.stop();
+        self.stop_chat_capture();
     }
 }
 
@@ -7374,19 +7224,14 @@ impl eframe::App for HebnixApp {
                         Tab::Patcher,
                         Tab::Settings,
                         Tab::Plugins,
-                        Tab::Notifications,
-                        Tab::RlApi,
+                        Tab::Replays,
                         Tab::About,
                     ] {
-                        let label = if tab == Tab::Notifications {
-                            crate::ui::toasts::tab_label(&self.toasts)
-                        } else {
-                            tab.label()
-                        };
-                        ui.selectable_value(&mut self.tab, tab, label);
+                        ui.selectable_value(&mut self.tab, tab, tab.label());
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                         ui.label(
                             egui::RichText::new(&self.status_text)
                                 .strong()
@@ -7411,95 +7256,28 @@ impl eframe::App for HebnixApp {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut self.items_mode, ItemsMode::Swapper, t("app-items-swapper"));
                             ui.selectable_value(&mut self.items_mode, ItemsMode::Spawner, t("app-items-spawner"));
+                            ui.selectable_value(&mut self.items_mode, ItemsMode::SpeedPatch, t("app-speed-patch"));
+                            ui.selectable_value(&mut self.items_mode, ItemsMode::WheelAlignment, t("app-wheel-alignment"));
+                            ui.selectable_value(&mut self.items_mode, ItemsMode::BallAppearance, t("app-ball-appearance"));
                         });
                         ui.separator();
-                        if self.items_mode == ItemsMode::Spawner {
-                            ui.horizontal(|ui| {
-                                let mut enabled = self.item_spawner_enabled;
-                                if ui.checkbox(&mut enabled, t("app-enable-items-spawner")).changed() {
-                                    if enabled {
-                                        self.spawner_enable_prompt_open = true;
-                                    } else {
-                                        self.disable_item_spawner();
-                                    }
-                                }
-                                ui.weak(t("app-read-tutorial-before-enabling"));
-                            });
-                            let cooked_pc = std::path::Path::new(&self.config.settings.rl_path)
-                                .join("TAGame").join("CookedPCConsole");
-                            egui::Panel::left("spawner_categories")
-                                .resizable(false)
-                                .default_size(200.0)
-                                .size_range(200.0..=320.0)
-                                .show(ui, |ui| {
-                                    egui::ScrollArea::vertical().id_salt("spawner_subtabs").show(ui, |ui| {
-                                        ui.selectable_value(&mut self.spawner_subtab, SpawnerSubTab::Tutorial, t("app-tutorial"));
-                                        ui.separator();
-                                        ui.add_enabled_ui(self.item_spawner_enabled && !self.spawn_restart_pending, |ui| {
-                                            for category in crate::swapper::SwapCategory::ALL {
-                                                ui.selectable_value(&mut self.spawner_subtab,
-                                                    SpawnerSubTab::Category(category), category.label());
-                                            }
-                                        });
-                                    });
-                                });
-                            egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-                                if !self.item_spawner_enabled || self.spawn_restart_pending {
-                                    self.spawner_subtab = SpawnerSubTab::Tutorial;
-                                }
-                                match self.spawner_subtab {
-                                    SpawnerSubTab::Tutorial => {
-                                        ui.heading(t("app-item-spawner-tutorial"));
-                                        ui.add_space(8.0);
-                                        ui.label(t("app-rocket-league-must-be-closed-before"));
-                                        ui.add_space(8.0);
-                                        ui.label(t("app-if-you-close-hebnix-while-rocket"));
-                                        ui.add_space(8.0);
-                                        ui.label(t("app-if-you-have-problems-connecting-to"));
-                                        ui.add_space(8.0);
-                                        ui.label(t("app-spawned-items-can-persist-locally-or"));
-                                        ui.add_space(8.0);
-                                        ui.label(t("app-disabling-item-spawner-stops-interceptio"));
-                                        ui.add_space(8.0);
-                                        if self.spawn_restart_pending {
-                                            ui.add_space(12.0);
-                                            ui.weak(t("app-start-rocket-league-to-use-the"));
-                                        }
-                                    }
-                                    SpawnerSubTab::Category(category) => {
-                                        if self.catalogs_loading {
-                                            ui.horizontal(|ui| { ui.spinner(); ui.label(t("app-loading-item-catalogs")); });
-                                        }
-                                        if let Some(error) = self.catalogs_error.clone() {
-                                            ui.colored_label(egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
-                                                t_args("app-catalog-download-failed-error", &[("error", error.to_string().into())]));
-                                            if ui.button(t("app-reload-catalogs")).clicked() { self.reload_catalogs(ctx); }
-                                        }
-                                        if self.catalogs_loaded {
-                                            if let Some((product_id, paint)) = self.swapper.render_spawn_tab(
-                                                ui, category, &cooked_pc, &self.tx) {
-                                                let request = crate::item_spawning::ItemSpawnRequest {
-                                                    product_id, series_id: 1, quality: 0, paint,
-                                                    certification: 0, quantity: 1,
-                                                };
-                                                match self.spoofer_mgr.spawn_item(&request) {
-                                                    Ok(()) => self.console.write(format!(
-                                                        "[Item Spawner] Queued product ID {product_id}.")),
-                                                    Err(error) => self.console.write(format!(
-                                                        "[Item Spawner] Could not spawn {product_id}: {error}")),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        } else {
-                        let rl_path = self.config.settings.rl_path.clone();
-                        let cooked_pc = std::path::Path::new(&rl_path)
+                        let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
                             .join("TAGame")
                             .join("CookedPCConsole");
                         let backups_dir = cooked_pc.join("Backups");
-
+                        if self.items_mode == ItemsMode::Spawner {
+                            let status = self.spoofer_mgr.item_status();
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{} items; {} legacy tracked IDs", status.active, status.legacy));
+                                if ui.add_enabled(!status.clearing, egui::Button::new("Remove Items")).clicked() {
+                                    match self.spoofer_mgr.begin_item_clear() {
+                                        Ok(()) => self.check_item_clear(),
+                                        Err(error) => self.item_clear_error = Some(error),
+                                    }
+                                }
+                            });
+                            if let Some(error) = &self.item_clear_error { ui.label(error); }
+                        } else if self.items_mode == ItemsMode::Swapper {
                         egui::Panel::left("patcher_settings_list")
                             .resizable(false)
                             .default_size(200.0)
@@ -7522,6 +7300,11 @@ impl eframe::App for HebnixApp {
                                             &mut self.patcher_subtab,
                                             PatcherSubTab::Decal,
                                             t("app-decal-patcher"),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.patcher_subtab,
+                                            PatcherSubTab::Car,
+                                            t("app-car-patcher"),
                                         );
                                         ui.separator();
                                         for category in crate::swapper::SwapCategory::ALL {
@@ -7546,11 +7329,12 @@ impl eframe::App for HebnixApp {
                             });
 
                         egui::CentralPanel::default()
-                            .frame(egui::Frame::new())
+                            .frame(crate::i18n::layout::subtab_content_frame())
                             .show(ui, |ui| {
                                 let catalog_required = matches!(
                                     self.patcher_subtab,
                                     PatcherSubTab::Decal
+                                        | PatcherSubTab::Car
                                         | PatcherSubTab::Swapper(_)
                                 );
                                 if self.catalogs_loading {
@@ -7603,6 +7387,16 @@ impl eframe::App for HebnixApp {
                                         &backups_dir,
                                         &self.tx,
                                         ctx,
+                                        &mut self.config,
+                                    );
+                                }
+                                PatcherSubTab::Car => {
+                                    self.patcher_car.render_tab(
+                                        ui,
+                                        ctx,
+                                        &cooked_pc,
+                                        &backups_dir,
+                                        &self.tx,
                                         &mut self.config,
                                     );
                                 }
@@ -7876,6 +7670,47 @@ impl eframe::App for HebnixApp {
                                 }
                                 }
                             });
+                        } else if self.items_mode == ItemsMode::SpeedPatch {
+                            egui::ScrollArea::vertical()
+                                .id_salt("items_speed_patch")
+                                .show(ui, |ui| {
+                                    if self.speed_patch.render(
+                                        ui,
+                                        &mut self.config.speed_patch,
+                                        &cooked_pc,
+                                        &backups_dir,
+                                        &self.tx,
+                                    ) {
+                                        self.save_config();
+                                    }
+                                });
+                        } else if self.items_mode == ItemsMode::WheelAlignment {
+                            if self.catalogs_loading { ui.spinner(); }
+                            if let Some(error) = &self.catalogs_error { ui.label(error); }
+                            self.wheel_alignment.render(ui, &cooked_pc);
+                        } else if self.items_mode == ItemsMode::BallAppearance {
+                            self.colours.poll();
+                            if let Some(action) =
+                                self.colours.render_ball_appearance(ui, &backups_dir)
+                            {
+                                if crate::messages::block_item_action_if_game_running(&self.tx) {
+                                    self.console.write(
+                                        "[Colours] Close Rocket League before changing game files.",
+                                    );
+                                } else if !spoofer::is_admin()
+                                    && crate::patcher::colours::needs_admin(&cooked_pc)
+                                {
+                                    self.colour_admin_prompt_open = true;
+                                } else {
+                                    self.colours.begin(
+                                        action,
+                                        &cooked_pc,
+                                        &backups_dir,
+                                        &self.tx,
+                                        ctx,
+                                    );
+                                }
+                            }
                         }
                     }
                     Tab::Colours => {
@@ -7907,138 +7742,28 @@ impl eframe::App for HebnixApp {
 
                     Tab::Settings => self.render_settings_tab(ui),
                     Tab::Plugins => self.render_plugins_tab(ui),
-                    Tab::Notifications => {
-                        self.toasts.mark_read();
-                        self.toast_view.render(ui, &mut self.toasts);
-                    }
-                    Tab::RlApi => {
-                        let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
-                            .join("TAGame")
-                            .join("CookedPCConsole");
-                        let backups_dir = cooked_pc.join("Backups");
-
-                        egui::Panel::left("experimental_list")
-                            .resizable(false)
-                            .default_size(200.0)
-                            .size_range(200.0..=320.0)
-                            .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("experimental_subtabs")
-                                    .show(ui, |ui| {
-                                        // ui.selectable_value(
-                                        //     &mut self.experimental_subtab,
-                                        //     ExperimentalSubTab::RlApi,
-                                        //     "RLAPI",
-                                        // );
-                                        ui.selectable_value(
-                                            &mut self.experimental_subtab,
-                                            ExperimentalSubTab::AutoUploadReplays,
-                                            "Auto Upload Replays",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.experimental_subtab,
-                                            ExperimentalSubTab::BallAppearance,
-                                            t("app-ball-appearance"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.experimental_subtab,
-                                            ExperimentalSubTab::CarPatcher,
-                                            t("app-car-patcher"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.experimental_subtab,
-                                            ExperimentalSubTab::WheelAlignment,
-                                            t("app-wheel-alignment"),
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.experimental_subtab,
-                                            ExperimentalSubTab::SpeedPatch,
-                                            t("app-speed-patch"),
-                                        );
-                                    });
-                            });
-
-                        egui::CentralPanel::default()
-                            .frame(egui::Frame::new())
-                            .show(ui, |ui| match self.experimental_subtab {
-                                ExperimentalSubTab::WheelAlignment => {
-                                    if self.catalogs_loading { ui.spinner(); }
-                                    if let Some(error) = &self.catalogs_error { ui.label(error); }
-                                    self.wheel_alignment.render(ui, &cooked_pc);
-                                }
-                                ExperimentalSubTab::RlApi => self.render_rlapi_tab(ui),
-                                ExperimentalSubTab::AutoUploadReplays => {
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        self.render_replay_auto_upload_tab(ui);
-                                    });
-                                }
-                                ExperimentalSubTab::SpeedPatch => {
-                                    egui::ScrollArea::vertical().show(ui, |ui| {
-                                        if self.speed_patch.render(
-                                            ui,
-                                            &mut self.config.speed_patch,
-                                            &cooked_pc,
-                                            &backups_dir,
-                                            &self.tx,
-                                        ) {
-                                            self.save_config();
-                                        }
-                                    });
-                                }
-                                ExperimentalSubTab::BallAppearance => {
-                                    self.colours.poll();
-                                    if let Some(action) =
-                                        self.colours.render_ball_appearance(ui, &backups_dir)
-                                    {
-                                        if crate::messages::block_item_action_if_game_running(
-                                            &self.tx,
-                                        ) {
-                                            self.console.write(
-                                                "[Colours] Close Rocket League before changing game files.",
-                                            );
-                                        } else if !spoofer::is_admin()
-                                            && crate::patcher::colours::needs_admin(&cooked_pc)
-                                        {
-                                            self.colour_admin_prompt_open = true;
-                                        } else {
-                                            self.colours.begin(
-                                                action,
-                                                &cooked_pc,
-                                                &backups_dir,
-                                                &self.tx,
-                                                ctx,
-                                            );
-                                        }
-                                    }
-                                }
-                                ExperimentalSubTab::CarPatcher => {
-                                    if self.catalogs_loading {
-                                        ui.horizontal(|ui| {
-                                            ui.spinner();
-                                            ui.label(t("app-loading-item-catalogs"));
+                    Tab::Replays => {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.replays_subtab,
+                                ReplaysSubTab::AutoUploadReplays,
+                                t("app-automatically-upload-replays"),
+                            );
+                        });
+                        ui.separator();
+                        match self.replays_subtab {
+                            ReplaysSubTab::AutoUploadReplays => {
+                                ui.columns(2, |columns| {
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("replays_auto_upload")
+                                        .auto_shrink([false, false])
+                                        .show(&mut columns[0], |ui| {
+                                            self.render_replay_auto_upload_tab(ui);
                                         });
-                                    }
-                                    if let Some(error) = self.catalogs_error.clone() {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
-                                            t_args("app-catalog-download-failed-error", &[("error", error.to_string().into())]),
-                                        );
-                                        if ui.button(t("app-reload-catalogs")).clicked() {
-                                            self.reload_catalogs(ctx);
-                                        }
-                                    }
-                                    if self.catalogs_loaded {
-                                        self.patcher_car.render_tab(
-                                            ui,
-                                            ctx,
-                                            &cooked_pc,
-                                            &backups_dir,
-                                            &self.tx,
-                                            &mut self.config,
-                                        );
-                                    }
-                                }
-                            });
+                                    self.auto_upload_replays.show_history(&mut columns[1]);
+                                });
+                            }
+                        }
                     }
                     Tab::About => self.render_about_tab(ui),
                 }
@@ -8076,9 +7801,8 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
-            self.render_spawner_enable_prompt(ctx);
+            self.render_item_clear_prompt(ctx);
             self.render_admin_prompt(ctx);
-            self.render_replay_upload_start_prompt(ctx);
             self.render_item_action_prompt(ctx);
             self.render_plugin_delete_prompt(ctx);
             self.render_owned_proxy_prompt(ctx);
@@ -8099,13 +7823,17 @@ impl eframe::App for HebnixApp {
             self.render_install_modal(ctx);
             self.render_rl_launch_setup(ctx);
         }
+        let fast_ms = 1000 / u64::from(self.config.settings.overlay_refresh_fps.clamp(20, 60));
         let plugin_tick_interval = if self.last_rl_open {
-            Duration::from_millis(50)
+            Duration::from_millis(fast_ms)
         } else {
             Duration::from_millis(500)
         };
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);
+        if !self.hidden {
+            self.render_notification_popup(ctx);
+        }
         self.plugin_mgr.flush_window_positions();
         self.render_game_overlay();
 
@@ -8116,7 +7844,7 @@ impl eframe::App for HebnixApp {
         let heartbeat = if self.toasts.showing() {
             Duration::from_millis(16)
         } else if fast {
-            Duration::from_millis(50)
+            Duration::from_millis(fast_ms)
         } else {
             Duration::from_millis(500)
         };

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub const REQUEST_PREFIX: &str = "HebnixRLAPI_";
+pub const MATCH_HISTORY_SERVICE: &str = "Matches/GetMatchHistory v1";
 
 pub fn shared_game_session() -> Arc<GameSession> {
     static SESSION: OnceLock<Arc<GameSession>> = OnceLock::new();
@@ -18,6 +19,7 @@ pub fn shared_game_session() -> Arc<GameSession> {
 #[derive(Default)]
 pub struct GameSession {
     enabled: AtomicBool,
+    websocket_enabled: AtomicBool,
     next_id: AtomicU64,
     connection: Mutex<Option<(u64, Sender<SessionRequest>)>>,
     error: Mutex<String>,
@@ -40,6 +42,7 @@ pub struct GameConnection {
 impl GameSession {
     pub fn reset(&self) {
         self.set_enabled(false);
+        self.set_websocket_enabled(false);
         *self.connection.lock().unwrap() = None;
     }
     pub fn enabled(&self) -> bool {
@@ -52,7 +55,18 @@ impl GameSession {
         }
     }
     pub fn connected(&self) -> bool {
-        self.enabled() && self.connection.lock().unwrap().is_some()
+        self.requests_enabled() && self.has_connection()
+    }
+    /// WebSocket spoofing also provides the captured game transport.
+    pub fn set_websocket_enabled(&self, enabled: bool) {
+        self.websocket_enabled.store(enabled, Ordering::Release);
+    }
+    fn requests_enabled(&self) -> bool {
+        self.enabled() || self.websocket_enabled.load(Ordering::Acquire)
+    }
+    /// Identifies the captured login, so consumers can discard stale results.
+    pub fn connection_generation(&self) -> Option<u64> {
+        self.connection.lock().unwrap().as_ref().map(|(id, _)| *id)
     }
     pub fn has_connection(&self) -> bool {
         self.connection.lock().unwrap().is_some()
@@ -61,7 +75,7 @@ impl GameSession {
         *self.error.lock().unwrap() = error;
     }
     pub fn status(&self) -> String {
-        if !self.enabled() {
+        if !self.requests_enabled() {
             return "Disabled".into();
         }
         if self.has_connection() {
@@ -87,17 +101,37 @@ impl GameSession {
         }
     }
     pub fn request(&self, service: &str, body: Value) -> Result<Value, String> {
+        self.request_inner(None, service, body)
+    }
+    /// Send only on the login for which the caller resolved its PlayerID.
+    pub fn request_for_connection(
+        &self,
+        generation: u64,
+        service: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        self.request_inner(Some(generation), service, body)
+    }
+    fn request_inner(
+        &self,
+        generation: Option<u64>,
+        service: &str,
+        body: Value,
+    ) -> Result<Value, String> {
         validate_request(service, &body)?;
-        if !self.enabled() {
-            return Err("Enable RLAPI and capture Rocket League's session first.".into());
+        if !self.requests_enabled() {
+            return Err(
+                "Enable WebSockets or RLAPI and capture Rocket League's session first.".into(),
+            );
         }
         let sender = self
             .connection
             .lock()
             .unwrap()
             .as_ref()
+            .filter(|(id, _)| generation.is_none_or(|generation| generation == *id))
             .map(|(_, tx)| tx.clone())
-            .ok_or("No captured game connection. Enable RLAPI before launching Rocket League.")?;
+            .ok_or("No matching captured game connection. Enable WebSockets or RLAPI before launching Rocket League.")?;
         let id = format!(
             "{REQUEST_PREFIX}{}_{}",
             std::process::id(),
@@ -122,7 +156,7 @@ impl GameSession {
 }
 impl GameConnection {
     pub fn current(&self) -> bool {
-        self.owner.enabled()
+        self.owner.requests_enabled()
             && self
                 .owner
                 .connection

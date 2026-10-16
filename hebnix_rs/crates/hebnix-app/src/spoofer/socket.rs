@@ -22,6 +22,7 @@ pub const REVERSE_ADDR: &str = "127.0.0.1:443";
 pub struct SocketProxy {
     running: Arc<AtomicBool>,
     addr: String,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SocketProxy {
@@ -47,7 +48,7 @@ impl SocketProxy {
         let server_config = build_server_config(resolver)?;
         let upstream = build_upstream_agent_pins(real_ips);
 
-        {
+        let worker = {
             let running = Arc::clone(&running);
             let addr_clone = addr.clone();
             std::thread::Builder::new()
@@ -63,15 +64,33 @@ impl SocketProxy {
                         &addr_clone,
                     )
                 })
-                .map_err(|e| format!("cant spawn socket proxy thread: {e}"))?;
-        }
+                .map_err(|e| format!("cant spawn socket proxy thread: {e}"))?
+        };
 
-        Ok(Self { running, addr })
+        Ok(Self {
+            running,
+            addr,
+            worker: std::sync::Mutex::new(Some(worker)),
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+            && self
+                .worker
+                .lock()
+                .map(|worker| worker.as_ref().is_some_and(|worker| !worker.is_finished()))
+                .unwrap_or(false)
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 }
 
@@ -114,6 +133,11 @@ fn handle_reverse(
     let mut conn =
         ServerConnection::new(Arc::clone(server_config)).map_err(|e| format!("tls conn: {e}"))?;
     let mut sock = client;
+    let timeout = Some(std::time::Duration::from_secs(15));
+    sock.set_read_timeout(timeout)
+        .map_err(|e| format!("read timeout: {e}"))?;
+    sock.set_write_timeout(timeout)
+        .map_err(|e| format!("write timeout: {e}"))?;
     while conn.is_handshaking() {
         conn.complete_io(&mut sock)
             .map_err(|e| format!("tls handshake: {e}"))?;
@@ -123,6 +147,12 @@ fn handle_reverse(
         .map(str::to_string)
         .ok_or("no sni on the reverse connection")?;
     tracing::debug!("reverse {host}");
+    if !["api.epicgames.dev", "config.psynet.gg"]
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err("Host is outside the Hebnix proxy scope".into());
+    }
 
     let tls = StreamOwned::new(conn, sock);
     serve_one(tls, upstream, rules, tx, &host)

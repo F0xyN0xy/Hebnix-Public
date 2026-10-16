@@ -540,7 +540,7 @@ impl PatcherState {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new())
+            .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| match self.subtab {
                 PatcherSubTab::Ball => {
                     self.render_ball_tab(ui, &cooked_pc, &upk_path, &backups_dir, tx, ctx, config)

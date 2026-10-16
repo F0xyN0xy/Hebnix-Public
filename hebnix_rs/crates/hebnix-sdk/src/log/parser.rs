@@ -33,7 +33,10 @@ re!(re_username, r"DevOnline: Logged in as '([^']+)'");
 re!(re_steam_id, r"DevOnline: Steam ID: (\d+)");
 re!(re_epic_username, r#"(?i)-epicusername=(?:"([^"]+)"|(\S+))"#);
 re!(re_epic_id, r"(?i)-epicuserid=([0-9a-f]+)");
-re!(re_eos_id, r"Connect login result 'EOS_Success' for player '([0-9a-fA-F]{32})'");
+re!(
+    re_eos_id,
+    r"Connect login result 'EOS_Success' for player '([0-9a-fA-F]{32})'"
+);
 re!(
     re_primary_id,
     r"Online_X\.UniqueNetIDToString\([^)]*PlayerID\)=\(([^|()]+)\|([^|()]+)\|(\d+)\)"
@@ -143,8 +146,26 @@ fn find_launch_log() -> PathBuf {
         .join("Launch.log")
 }
 
-/// parse Launch.log into session + game info. verify=true (recommended) checks
-/// the stats api before returning game data. session is always returned.
+/// Read the local account ID without network or Stats API verification.
+pub fn local_player_id() -> Option<String> {
+    let bytes = std::fs::read(find_launch_log()).ok()?;
+    parse_primary_id(&String::from_utf8_lossy(&bytes))
+}
+
+fn parse_primary_id(text: &str) -> Option<String> {
+    if let Some(c) = find_last(re_primary_id(), text) {
+        return Some(format!("{}|{}|{}", &c[1], &c[2], &c[3]));
+    }
+    if let Some(c) = find_last(re_epic_id(), text).or_else(|| find_last(re_eos_id(), text)) {
+        return Some(format!("Epic|{}|0", &c[1]));
+    }
+    re_steam_id()
+        .captures(text)
+        .map(|c| format!("Steam|{}|0", &c[1]))
+}
+
+/// Parse Launch.log into session + game info. verify=true checks the Stats API
+/// before returning game data. Session information is always returned.
 pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> LogInfo {
     let log_path = log_path
         .map(Path::to_path_buf)
@@ -183,13 +204,7 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
             session.epic_id = Some(c[1].to_string());
         }
     }
-    if let Some(c) = find_last(re_primary_id(), &text) {
-        session.primary_id = Some(format!("{}|{}|{}", &c[1], &c[2], &c[3]));
-    } else if let Some(epic_id) = &session.epic_id {
-        session.primary_id = Some(format!("Epic|{epic_id}|0"));
-    } else if let Some(steam_id) = &session.steam_id {
-        session.primary_id = Some(format!("Steam|{steam_id}|0"));
-    }
+    session.primary_id = parse_primary_id(&text);
     // Epic's launcher command line is local and remains unaffected by Hebnix's
     // account-spoofer proxy. Prefer it over an externally supplied display name.
     if session.epic_id.is_some() {
@@ -396,8 +411,6 @@ fn tags_of_last_map_load(text: &str) -> Option<String> {
     let line = text[pos..].lines().next()?;
     re_loadmap_tags().captures(line).map(|c| c[1].to_string())
 }
-
-
 
 /// the game loads Mutators_SF.upk once per mutator
 fn count_mutator_packages(text: &str) -> i64 {

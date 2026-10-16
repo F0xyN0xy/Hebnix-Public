@@ -2,6 +2,31 @@
 
 use eframe::egui::{self, Color32};
 
+/// Shared gap between vertical subtab separators and their content.
+pub fn subtab_content_frame() -> egui::Frame {
+    egui::Frame::new().inner_margin(egui::Margin {
+        left: 5,
+        ..Default::default()
+    })
+}
+
+/// Reserve one label column while keeping the text against its left edge.
+pub fn settings_label(
+    ui: &mut egui::Ui,
+    width: f32,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 20.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(egui::vec2(width, 20.0));
+            ui.add(egui::Label::new(text).truncate())
+        },
+    )
+    .inner
+}
+
 /// width for a settings page's label column: the widest label on that page,
 /// never narrower than `min` (the old fixed width), capped so one huge label
 /// can't eat the row. keeps the inputs next to the labels lined up.

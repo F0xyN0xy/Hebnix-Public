@@ -30,13 +30,13 @@ mod epic_connection;
 mod hosts_file;
 mod hotkey;
 mod i18n;
-#[path = "item-spawning/mod.rs"]
-mod item_spawning;
+mod item_cleanup;
 mod messages;
 mod monitor;
 mod multiplayer_assets;
 #[path = "multiplayer-lan/mod.rs"]
 mod multiplayer_lan;
+mod notifications;
 mod overlay;
 mod veryimportantfile;
 mod patch_core {
@@ -45,7 +45,9 @@ mod patch_core {
 mod plugins;
 mod presets;
 mod rl_launch;
+mod recovery_tasks;
 mod runtime_assets;
+mod screen;
 mod spoofer;
 mod statsapi_ini;
 mod speed_patch {

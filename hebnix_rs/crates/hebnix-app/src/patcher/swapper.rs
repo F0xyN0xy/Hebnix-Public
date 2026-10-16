@@ -95,6 +95,8 @@ struct SwapItem {
     upk: String,
     path: Option<String>,
     thumbnail: Option<String>,
+    /// Associated car image for engine cards; never an installation destination.
+    body_preview: Option<String>,
     audio_bnk: Option<String>,
     upk_type: String,
     product_id: Option<i64>,
@@ -170,18 +172,22 @@ fn inferred_thumbnail(category: SwapCategory, item: &SwapItem, cooked_pc: &Path)
     None
 }
 
+fn preview_thumbnail(category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> Option<String> {
+    if category == SwapCategory::Engines {
+        if let Some(name) = item.body_preview.as_ref().filter(|name| {
+            cooked_pc.join(name).is_file()
+                || cooked_pc.join("Backups").join(format!("{name}.bak")).is_file()
+        }) {
+            return Some(name.clone());
+        }
+    }
+    inferred_thumbnail(category, item, cooked_pc)
+}
+
 // Preview availability must never determine whether an installed item is listed.
 fn source_upks_available(_category: SwapCategory, item: &SwapItem, cooked_pc: &Path) -> bool {
     cooked_pc.join(&item.upk).is_file()
 }
-fn explosion_thumbnail_asset(item: &SwapItem) -> Option<String> {
-    let object = item.path.as_deref()?.split('.').next_back()?;
-    (!object.is_empty()).then(|| {
-        let thumbnail = format!("{object}_TThumbnail");
-        format!("{thumbnail}.{thumbnail}")
-    })
-}
-
 fn prettify_car_key(key: &str) -> String {
     key.split('_')
         .filter(|part| !part.is_empty())
@@ -359,12 +365,9 @@ pub struct SwapperState {
     )>,
     resolutions: HashMap<SwapCategory, Resolution>,
     resolution_generation: u64,
-    spawn_search: HashMap<SwapCategory, String>,
-    spawn_page: HashMap<SwapCategory, usize>,
-    spawn_paint: HashMap<(SwapCategory, i64), usize>,
     swap_paint: HashMap<String, SwapPaint>,
     swap_speed: HashMap<String, f32>,
-    /// set from the Experimental tab; shows the speed picker on swap rows
+    /// set from the Items animation speed tab; shows the speed picker on swap rows
     pub speed_enabled: bool,
 }
 
@@ -391,7 +394,7 @@ impl SwapperState {
                     .iter()
                     .map(|item| ResolvedItem {
                         available: source_upks_available(category, item, &cooked_pc),
-                        thumbnail: inferred_thumbnail(category, item, &cooked_pc),
+                        thumbnail: preview_thumbnail(category, item, &cooked_pc),
                     })
                     .collect();
                 let mut cars = if category == SwapCategory::Skins {
@@ -458,9 +461,6 @@ impl SwapperState {
             resolution_results,
             resolutions: HashMap::new(),
             resolution_generation: 0,
-            spawn_search: HashMap::new(),
-            spawn_page: HashMap::new(),
-            spawn_paint: HashMap::new(),
             swap_paint: HashMap::new(),
             swap_speed: HashMap::new(),
             speed_enabled: false,
@@ -521,7 +521,10 @@ impl SwapperState {
             self.thumbnails.insert(key.clone(), None);
             let _ = self.thumbnail_jobs.send((
                 key,
-                cooked_pc.join(filename),
+                {
+                    let backup = cooked_pc.join("Backups").join(format!("{filename}.bak"));
+                    if backup.is_file() { backup } else { cooked_pc.join(filename) }
+                },
                 category.slug().to_string(),
                 ui.ctx().clone(),
             ));
@@ -657,6 +660,13 @@ impl SwapperState {
             }
         }
         let mut seen = HashSet::new();
+        if category == SwapCategory::Engines {
+            for item in &mut items {
+                item.body_preview = crate::cosmetic_thumbnail::body_preview_for_engine(
+                    &item.name, &item.upk, bodies,
+                );
+            }
+        }
         items.retain(|item| seen.insert(item.upk.to_ascii_lowercase()));
         items.sort_by(|a, b| {
             a.name
@@ -694,6 +704,7 @@ impl SwapperState {
                 .get("thumbnail")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            body_preview: None,
             audio_bnk: value
                 .get("audio_bnk")
                 .and_then(Value::as_str)
@@ -856,20 +867,19 @@ impl SwapperState {
                 } else {
                     &source_live
                 };
-                let donor_thumbnail_asset = (category == SwapCategory::Goals)
-                    .then(|| explosion_thumbnail_asset(source))
-                    .flatten();
-                let target_thumbnail_asset = (category == SwapCategory::Goals)
-                    .then(|| explosion_thumbnail_asset(target))
-                    .flatten();
-                if let Err(error) = crate::cosmetic_upk::patch_for_target(
-                    thumbnail_source,
-                    &target_backup,
-                    &target_live,
-                    &self.base_dir,
-                    donor_thumbnail_asset.as_deref(),
-                    target_thumbnail_asset.as_deref(),
-                ) {
+                let thumbnail_result = (|| {
+                    let donor_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                        thumbnail_source, &self.base_dir, source.path.as_deref(),
+                    )?;
+                    let target_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                        &target_backup, &self.base_dir, target.path.as_deref(),
+                    )?;
+                    crate::cosmetic_upk::patch_for_target(
+                        thumbnail_source, &target_backup, &target_live, &self.base_dir,
+                        Some(&donor_asset), Some(&target_asset),
+                    )
+                })();
+                if let Err(error) = thumbnail_result {
                     let _ = fs::copy(
                         backups_dir.join(format!("{}.bak", target.upk)),
                         cooked_pc.join(&target.upk),
@@ -1192,7 +1202,7 @@ impl SwapperState {
                     // catalog thumbnail. A patched target thumbnail can be unreadable by
                     // the preview extractor even though Rocket League accepts the package.
                     let source_path = source_item
-                        .and_then(|item| inferred_thumbnail(category?, item, cooked_pc))
+                        .and_then(|item| preview_thumbnail(category?, item, cooked_pc))
                         .map(|filename| {
                             let backup = backups_dir.join(format!("{filename}.bak"));
                             if backup.is_file() {
@@ -2234,224 +2244,5 @@ impl SwapperState {
             }
         }
         owned_filter_requested
-    }
-}
-
-impl SwapperState {
-    pub fn render_spawn_tab(
-        &mut self,
-        ui: &mut egui::Ui,
-        category: SwapCategory,
-        cooked_pc: &Path,
-        tx: &Sender<AppMsg>,
-    ) -> Option<(i64, usize)> {
-        self.collect_thumbnails();
-        ui.horizontal(|ui| {
-            ui.heading(category.label());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(t("app-reload-catalogs")).clicked() {
-                    let _ = tx.send(AppMsg::ReloadCatalogs);
-                }
-            });
-        });
-        ui.horizontal(|ui| {
-            ui.strong(t("spoofer-search"));
-            let search = self.spawn_search.entry(category).or_default();
-            if ui
-                .add(
-                    egui::TextEdit::singleline(search)
-                        .hint_text(t_args(
-                            "tab-search-category",
-                            &[(
-                                "category",
-                                (category.label().to_lowercase()).to_string().into(),
-                            )],
-                        ))
-                        .desired_width(300.0),
-                )
-                .changed()
-            {
-                self.spawn_page.insert(category, 0);
-            }
-            if ui.button(t("spoofer-clear")).clicked() {
-                search.clear();
-                self.spawn_page.insert(category, 0);
-            }
-        });
-        ui.separator();
-        ui.add_space(10.0);
-        self.thumbnail_status(ui, category);
-        let Some(items) = self.catalogs.get(&category).cloned() else {
-            ui.weak(t("spawn-catalog-could-not-be-loaded"));
-            return None;
-        };
-        let Some(resolved) = self.resolved_items(ui, category, cooked_pc, &items) else {
-            return None;
-        };
-        let query = self
-            .spawn_search
-            .get(&category)
-            .map(String::as_str)
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let filtered: Vec<_> = items
-            .iter()
-            .enumerate()
-            .filter(|(index, item)| {
-                item.product_id.is_some_and(|id| id > 0)
-                    && resolved[*index].available
-                    && (query.is_empty()
-                        || item_label(category, item)
-                            .to_ascii_lowercase()
-                            .contains(&query)
-                        || item.upk.to_ascii_lowercase().contains(&query)
-                        || item
-                            .product_id
-                            .is_some_and(|id| id.to_string().contains(&query)))
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if filtered.is_empty() {
-            ui.vertical_centered(|ui| ui.weak(t("spawn-no-spawnable-items-match-the-search")));
-            return None;
-        }
-        const PAGE_SIZE: usize = 16;
-        let total_pages = filtered.len().div_ceil(PAGE_SIZE);
-        let page = self.spawn_page.entry(category).or_insert(0);
-        *page = (*page).min(total_pages - 1);
-        ui.horizontal(|ui| {
-            ui.label(t_args(
-                "tab-page-page-of-total-pages-filtered",
-                &[
-                    ("page", (*page + 1).to_string().into()),
-                    ("total_pages", total_pages.to_string().into()),
-                    ("filtered", (filtered.len()).to_string().into()),
-                ],
-            ));
-            if ui
-                .add_enabled(*page > 0, egui::Button::new(t("ball-previous")))
-                .clicked()
-            {
-                *page -= 1;
-            }
-            if ui
-                .add_enabled(*page + 1 < total_pages, egui::Button::new(t("ball-next")))
-                .clicked()
-            {
-                *page += 1;
-            }
-        });
-        ui.add_space(6.0);
-        let visible = &filtered[*page * PAGE_SIZE..((*page + 1) * PAGE_SIZE).min(filtered.len())];
-        let fallback: Arc<[u8]> = fs::read(self.base_dir.join("assets").join("hebnix.png"))
-            .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec())
-            .into();
-        for &index in visible {
-            if let Some(filename) = resolved[index].thumbnail.as_deref() {
-                self.queue_thumbnail(ui, category, &filename, cooked_pc);
-            }
-        }
-        let mut spawn = None;
-        egui::ScrollArea::vertical()
-            .id_salt(("spawner_grid", category))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for row in visible.chunks(4) {
-                    ui.columns(4, |columns| {
-                        for (column, &index) in row.iter().enumerate() {
-                            let item = &items[index];
-                            let thumbnail = resolved[index]
-                                .thumbnail
-                                .as_deref()
-                                .and_then(|filename| {
-                                    self.thumbnails
-                                        .get(&format!(
-                                            "{}|{}",
-                                            category.slug(),
-                                            filename.to_ascii_lowercase()
-                                        ))
-                                        .and_then(Clone::clone)
-                                })
-                                .unwrap_or_else(|| fallback.clone());
-                            egui::Frame::group(columns[column].style()).show(
-                                &mut columns[column],
-                                |ui| {
-                                    ui.set_min_height(238.0);
-                                    ui.vertical_centered(|ui| {
-                                        ui.add(
-                                            egui::Image::from_bytes(
-                                                format!(
-                                                    "bytes://spawner/{}/{}/{:08x}",
-                                                    category.slug(),
-                                                    index,
-                                                    crc32fast::hash(&thumbnail)
-                                                ),
-                                                thumbnail,
-                                            )
-                                            .fit_to_exact_size(egui::vec2(120.0, 76.0)),
-                                        );
-                                        let label = item_label(category, item);
-                                        ui.strong(shorten_for_card(&label))
-                                            .on_hover_text(format!("{label}\n{}", item.upk));
-                                        ui.weak(t_args(
-                                            "spawn-id-item",
-                                            &[(
-                                                "item",
-                                                (item.product_id.unwrap_or_default())
-                                                    .to_string()
-                                                    .into(),
-                                            )],
-                                        ));
-                                        let mut paint = 0;
-                                        if item.paintable {
-                                            ui.add_space(6.0);
-                                            ui.label(t("spawn-paint"));
-                                            let selected = self
-                                                .spawn_paint
-                                                .entry((
-                                                    category,
-                                                    item.product_id.unwrap_or_default(),
-                                                ))
-                                                .or_insert(0);
-                                            egui::ComboBox::from_id_salt((
-                                                "spawn_paint",
-                                                category,
-                                                item.product_id,
-                                            ))
-                                            .width(ui.available_width())
-                                            .selected_text(crate::item_spawning::PAINTS[*selected])
-                                            .show_ui(
-                                                ui,
-                                                |ui| {
-                                                    for (index, name) in
-                                                        crate::item_spawning::PAINTS
-                                                            .iter()
-                                                            .enumerate()
-                                                    {
-                                                        ui.selectable_value(selected, index, *name);
-                                                    }
-                                                },
-                                            );
-                                            paint = *selected;
-                                        }
-                                        ui.add_space(8.0);
-                                        if ui
-                                            .add_sized(
-                                                [ui.available_width(), 26.0],
-                                                egui::Button::new(t("spawn-spawn")),
-                                            )
-                                            .clicked()
-                                        {
-                                            spawn = item.product_id.map(|id| (id, paint));
-                                        }
-                                    });
-                                },
-                            );
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
-            });
-        spawn
     }
 }
