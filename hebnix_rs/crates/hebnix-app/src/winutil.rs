@@ -326,16 +326,12 @@ fn kill_rocket_league_elevated() -> std::io::Result<bool> {
 /// Remove Rocket League's embedded-browser cache, if it exists, including
 /// when Windows redirects Documents to OneDrive or another drive/share.
 pub fn clear_rocket_league_web_cache() -> std::io::Result<()> {
-    // dirs uses Windows' Documents known folder, matching the SDK's log/save
-    // paths. Only fall back to the traditional location if resolution fails.
-    let documents = dirs::document_dir()
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|profile| std::path::PathBuf::from(profile).join("Documents"))
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "Documents folder is unavailable")
-        })?;
+    let documents = hebnix_sdk::utils::paths::documents_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Documents folder is unavailable",
+        )
+    })?;
     if !documents.is_absolute() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

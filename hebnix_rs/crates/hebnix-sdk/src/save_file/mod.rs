@@ -204,7 +204,11 @@ pub fn detect_save_data_path() -> Option<PathBuf> {
         return Some(rl.save_data_path);
     }
 
-    let docs = dirs::document_dir()?;
+    let docs = crate::utils::paths::documents_dir()?;
+    newest_save_data_path(&docs)
+}
+
+fn newest_save_data_path(docs: &Path) -> Option<PathBuf> {
     let mut best_path: Option<PathBuf> = None;
     let mut best_mtime: Option<std::time::SystemTime> = None;
 
@@ -223,4 +227,50 @@ pub fn detect_save_data_path() -> Option<PathBuf> {
         }
     }
     best_path
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn redirected_documents_support_save_discovery_reading_and_writing() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("hebnix-save-path-{}-{nonce}", std::process::id()));
+        let docs = root.join("OneDrive/Documents");
+        let raw = RawSave {
+            source_file: String::new(),
+            encrypted_size: 0,
+            crc_expected: 0,
+            crc_calculated: 0,
+            crc_match: true,
+            foosball: 0xF005_BA11,
+            magic: 0x7FFF_FFFF,
+            engine_version: 1,
+            licensee_version: 1,
+            type_version: 1,
+            object_types: Vec::new(),
+            properties: serde_json::json!({}),
+            objects: Vec::new(),
+        };
+        for relative in [SAVE_PATH_STEAM, SAVE_PATH_EPIC] {
+            let directory = docs.join(relative);
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("0123456789abcdef0123456789abcdef.save");
+            assemble_savedata(&raw, &path).unwrap();
+            let detected = newest_save_data_path(&docs).unwrap();
+            assert!(detected.starts_with(&docs));
+            assert_eq!(find_save_file(Some(&directory)), Some(path.clone()));
+            assert_eq!(find_save_accounts(Some(&directory))[0].path, path);
+            let mut parsed = parse_savedata(&path, true).unwrap();
+            parsed.engine_version = 2;
+            assemble_savedata(&parsed, &path).unwrap();
+            assert_eq!(load(&path, true).unwrap().header.engine_version, 2);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

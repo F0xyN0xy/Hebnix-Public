@@ -10,6 +10,7 @@ use crate::toast::{HISTORY_MAX, PluginTag, Stamp, ToastCenter, preview};
 
 #[derive(Default)]
 pub struct ToastView {
+    bell_open: bool,
     // plugin slug, empty is all
     selected: String,
     open: HashSet<u64>,
@@ -159,13 +160,28 @@ pub fn render_bell(ui: &mut egui::Ui, view: &mut ToastView, center: &mut ToastCe
         )
         .on_hover_text(t("tab-notifications"));
     let width = (ui.ctx().content_rect().width() - 32.0).clamp(180.0, 360.0);
-    egui::Popup::from_toggle_button_response(&button)
+    if button.clicked() {
+        view.bell_open = !view.bell_open;
+        if !view.bell_open {
+            egui::Popup::close_all(ui.ctx());
+        }
+    }
+    // ComboBox owns egui's single memory popup slot. Keep the bell's state
+    // separate, and let clicks in its filter popup finish before closing it.
+    let filter_open = egui::Popup::is_any_open(ui.ctx());
+    let mut bell_open = view.bell_open;
+    egui::Popup::from_response(&button)
+        .open_bool(&mut bell_open)
         .align(egui::RectAlign::BOTTOM_END)
         .align_alternatives(&[])
         .gap(4.0)
         .width(width)
         .layout(egui::Layout::top_down(egui::Align::Min))
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .close_behavior(if filter_open {
+            egui::PopupCloseBehavior::IgnoreClicks
+        } else {
+            egui::PopupCloseBehavior::CloseOnClickOutside
+        })
         .show(|ui| {
             ui.set_width(width);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -181,4 +197,104 @@ pub fn render_bell(ui: &mut egui::Ui, view: &mut ToastView, center: &mut ToastCe
             ui.separator();
             view.render(ui, center);
         });
+    view.bell_open = bell_open;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(
+        ctx: &egui::Context,
+        view: &mut ToastView,
+        center: &mut ToastCenter,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| render_bell(ui, view, center));
+            },
+        )
+    }
+
+    fn text_pos(output: &egui::FullOutput, text: &str) -> egui::Pos2 {
+        fn visit(shape: &egui::epaint::Shape, text: &str, found: &mut Vec<egui::Pos2>) {
+            match shape {
+                egui::epaint::Shape::Text(shape) if shape.galley.text() == text => {
+                    found.push(shape.pos + shape.galley.size() * 0.5);
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        visit(shape, text, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for shape in &output.shapes {
+            visit(&shape.shape, text, &mut found);
+        }
+        found
+            .into_iter()
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .unwrap_or_else(|| panic!("Missing text: {text}"))
+    }
+
+    fn click(ctx: &egui::Context, view: &mut ToastView, center: &mut ToastCenter, pos: egui::Pos2) {
+        for pressed in [true, false] {
+            frame(
+                ctx,
+                view,
+                center,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_dropdown_keeps_notifications_open_and_outside_click_closes_them() {
+        let ctx = egui::Context::default();
+        let mut view = ToastView {
+            bell_open: true,
+            ..Default::default()
+        };
+        let mut center = ToastCenter::default();
+        center.push("example", "Example", "Message", Default::default());
+        for _ in 0..3 {
+            frame(&ctx, &mut view, &mut center, vec![]);
+        }
+        let output = frame(&ctx, &mut view, &mut center, vec![]);
+        let filter = text_pos(&output, &t("toast-filter-all"));
+        click(&ctx, &mut view, &mut center, filter);
+        assert!(view.bell_open, "opening the filter closed the bell");
+        assert!(egui::Popup::is_any_open(&ctx));
+        for _ in 0..2 {
+            frame(&ctx, &mut view, &mut center, vec![]);
+        }
+        let output = frame(&ctx, &mut view, &mut center, vec![]);
+        let option = text_pos(&output, "Example (1)");
+        click(&ctx, &mut view, &mut center, option);
+        assert_eq!(view.selected, "example");
+        assert!(view.bell_open, "selecting a plugin closed the bell");
+        frame(&ctx, &mut view, &mut center, vec![]);
+        click(&ctx, &mut view, &mut center, egui::pos2(750.0, 750.0));
+        assert!(!view.bell_open);
+    }
 }

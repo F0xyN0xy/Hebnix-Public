@@ -13,6 +13,7 @@ mod lite_app;
 #[path = "lite_messages.rs"]
 mod messages;
 mod monitor;
+mod notifications;
 mod overlay;
 mod plugins;
 mod runtime_assets;

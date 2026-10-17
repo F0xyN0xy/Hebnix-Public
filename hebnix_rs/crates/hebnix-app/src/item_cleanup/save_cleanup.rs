@@ -17,13 +17,53 @@ fn regular(path: &Path) -> Result<(), String> {
     {
         use std::os::windows::fs::MetadataExt;
         if meta.file_attributes() & 0x400 != 0 {
-            return Err("save path is a reparse point; refusing to follow it".into());
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo, GetFileInformationByHandleEx,
+            };
+            // OneDrive Files On-Demand uses cloud reparse tags even for local
+            // files. Allow those while continuing to reject links/junctions.
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+            unsafe {
+                GetFileInformationByHandleEx(
+                    HANDLE(file.as_raw_handle()),
+                    FileAttributeTagInfo,
+                    &mut info as *mut _ as *mut _,
+                    std::mem::size_of_val(&info) as u32,
+                )
+            }
+            .map_err(|e| e.to_string())?;
+            if !is_cloud_reparse_tag(info.ReparseTag) {
+                return Err("save path is a reparse point; refusing to follow it".into());
+            }
         }
     }
     if !meta.is_file() || meta.len() > 64 * 1024 * 1024 {
         return Err("save is not a supported regular file".into());
     }
     Ok(())
+}
+
+fn is_cloud_reparse_tag(tag: u32) -> bool {
+    // IO_REPARSE_TAG_CLOUD and CLOUD_1 through CLOUD_F use bits 12..15.
+    tag & !0x0000_f000 == 0x9000_001a
+}
+
+#[cfg(test)]
+mod cloud_tests {
+    use super::*;
+
+    #[test]
+    fn onedrive_cloud_tags_are_allowed_but_links_are_not() {
+        for variant in 0..16 {
+            assert!(is_cloud_reparse_tag(0x9000_001a | (variant << 12)));
+        }
+        for tag in [0, 0xa000_0003, 0xa000_000c, 0x8000_001b] {
+            assert!(!is_cloud_reparse_tag(tag));
+        }
+    }
 }
 fn account_filename(path: &Path) -> bool {
     if !path
@@ -46,7 +86,8 @@ fn account_filename(path: &Path) -> bool {
         && parts.next().is_none()
 }
 fn discover() -> Result<Vec<PathBuf>, String> {
-    let docs = dirs::document_dir().ok_or("Cannot locate Rocket League's Documents directory")?;
+    let docs = hebnix_sdk::utils::paths::documents_dir()
+        .ok_or("Cannot locate Rocket League's Documents directory")?;
     let mut paths = Vec::new();
     for relative in [
         hebnix_sdk::utils::constants::SAVE_PATH_STEAM,
@@ -214,4 +255,3 @@ pub fn clear_saved_instances(
     }
     execute(&paths, targets, generation, require_closed, plan_cleanup)
 }
-

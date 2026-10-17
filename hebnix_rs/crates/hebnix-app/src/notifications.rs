@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use eframe::egui;
 use serde::Deserialize;
 
 const ENDPOINT: &str = "https://api.hebnix.com/notifications";
@@ -31,6 +32,46 @@ impl Notification {
     }
 }
 
+/// Shared announcement UI for both editions. Only an explicit close dismisses it.
+pub fn render_popup(ctx: &egui::Context, notification: &Notification) -> bool {
+    let mut dismissed = false;
+    let id = egui::Id::new("web_notification");
+    egui::Modal::new(id).show(ctx, |ui| {
+        ui.set_width(440.0_f32.min((ctx.content_rect().width() - 48.0).max(120.0)));
+        ui.horizontal(|ui| {
+            ui.heading("Notification");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                dismissed |= ui.button("×").on_hover_text("Dismiss").clicked();
+            });
+        });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .max_height((ctx.content_rect().height() * 0.6).max(80.0))
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(&notification.message).wrap());
+            });
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if let Some(url) = notification.link_url() {
+                let text = notification
+                    .link_text
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or("Open link");
+                if ui.button(text).clicked() {
+                    let _ = open::that(url.as_str());
+                }
+            }
+            dismissed |= ui.button("Dismiss").clicked();
+        });
+    });
+    let layer = egui::LayerId::new(egui::Order::Foreground, id);
+    ctx.move_to_top(layer);
+    ctx.memory_mut(|memory| memory.set_modal_layer(layer));
+    // Ignore backdrop clicks/Escape: the announcement stays until explicitly closed.
+    dismissed
+}
+
 pub fn check_on_start(
     dismissed_id: u64,
     tx: crossbeam_channel::Sender<crate::messages::AppMsg>,
@@ -56,4 +97,49 @@ pub fn check_on_start(
                 ctx.request_repaint();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_new_nonempty_announcements_are_shown() {
+        let mut notification: Notification =
+            serde_json::from_str(r#"{"id":4,"message":"New announcement"}"#).unwrap();
+        assert!(notification.is_newer_than(3));
+        assert!(!notification.is_newer_than(4));
+        assert!(!notification.is_newer_than(5));
+        notification.message = " \n\t".into();
+        assert!(!notification.is_newer_than(0));
+    }
+
+    #[test]
+    fn optional_links_and_link_text_follow_the_api_format() {
+        let notification: Notification = serde_json::from_str(
+            r#"{"id":1,"message":"News","link":"/news","link-text":"Read more"}"#,
+        )
+        .unwrap();
+        assert_eq!(notification.link_text.as_deref(), Some("Read more"));
+        assert_eq!(
+            notification.link_url().unwrap().as_str(),
+            "https://api.hebnix.com/news"
+        );
+        let notification: Notification =
+            serde_json::from_str(r#"{"id":1,"message":"News"}"#).unwrap();
+        assert!(notification.link_url().is_none());
+    }
+
+    #[test]
+    fn non_web_links_are_not_offered() {
+        for link in ["", " ", "javascript:alert(1)", "file:///C:/example.txt"] {
+            let notification = Notification {
+                id: 1,
+                message: "News".into(),
+                link: Some(link.into()),
+                link_text: None,
+            };
+            assert!(notification.link_url().is_none(), "{link}");
+        }
+    }
 }

@@ -19,7 +19,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.2.3";
+pub const APP_VERSION: &str = "2.2.4";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -141,6 +141,7 @@ pub struct LiteApp {
     update_downloading: bool,
     update_error: Option<String>,
     changelog_popup: Option<crate::update::ChangelogEntry>,
+    notification_popup: Option<crate::notifications::Notification>,
     epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     quitting: bool,
@@ -194,6 +195,11 @@ impl LiteApp {
         theme::apply_window_opacity(&cc.egui_ctx, config.settings.window_opacity);
 
         let (tx, rx) = crossbeam_channel::unbounded();
+        crate::notifications::check_on_start(
+            config.notification_id,
+            tx.clone(),
+            cc.egui_ctx.clone(),
+        );
         let show_changelog = base_dir.join(".first").exists();
         let launch_marker = base_dir.join(".launch");
         if launch_marker.exists() {
@@ -357,6 +363,7 @@ impl LiteApp {
             update_downloading: false,
             update_error: None,
             changelog_popup: None,
+            notification_popup: None,
             epic_repair: Default::default(),
             launch_path_notice: false,
             quitting: false,
@@ -702,6 +709,11 @@ impl LiteApp {
                         .console
                         .write(format!("[Console] Theme installation failed: {error}")),
                 },
+                AppMsg::NotificationFetched(notification) => {
+                    if notification.is_newer_than(self.config.notification_id) {
+                        self.notification_popup = Some(notification);
+                    }
+                }
                 AppMsg::AppUpdateFetched { result } => {
                     if let Ok(Some(info)) = result {
                         self.console
@@ -1348,6 +1360,17 @@ impl LiteApp {
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
             self.changelog_popup = None;
+        }
+    }
+
+    fn render_notification_popup(&mut self, ctx: &egui::Context) {
+        let Some(notification) = self.notification_popup.as_ref() else {
+            return;
+        };
+        if crate::notifications::render_popup(ctx, notification) {
+            self.config.notification_id = self.config.notification_id.max(notification.id);
+            self.save_config();
+            self.notification_popup = None;
         }
     }
 
@@ -3068,6 +3091,9 @@ impl eframe::App for LiteApp {
         self.render_launch_path_notice(&ctx);
         self.render_changelog_popup(&ctx);
         self.epic_repair.show(&ctx);
+        if !self.hidden {
+            self.render_notification_popup(&ctx);
+        }
         ctx.request_repaint_after(
             if self.last_rl_open
                 && (self.plugin_mgr.has_tick_plugins()

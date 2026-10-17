@@ -2,6 +2,15 @@
 
 use std::path::PathBuf;
 
+/// Windows' Documents known folder includes OneDrive and other folder redirects.
+/// Use the traditional location only when the known folder is unavailable.
+pub fn documents_dir() -> Option<PathBuf> {
+    dirs::document_dir()
+        .filter(|path| path.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .filter(|path| path.is_absolute())
+}
+
 /// The root for all Hebnix-owned files.
 ///
 /// On Windows this is `%AppData%\Hebnix`. `HEBNIX_BASE_DIR` remains available
