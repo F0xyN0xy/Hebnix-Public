@@ -350,11 +350,13 @@ fn kill_rocket_league_elevated() -> std::io::Result<bool> {
 }
 
 pub fn clear_rocket_league_web_cache() -> std::io::Result<()> {
-    let user_profile = std::env::var_os("USERPROFILE").ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "USERPROFILE is not set")
+    let documents = hebnix_sdk::utils::paths::documents_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Documents folder is unavailable",
+        )
     })?;
-    let web_cache = std::path::PathBuf::from(user_profile)
-        .join(r"Documents\My Games\Rocket League\TAGame\Cache\WebCache");
+    let web_cache = documents.join(r"My Games\Rocket League\TAGame\Cache\WebCache");
     match std::fs::remove_dir_all(web_cache) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

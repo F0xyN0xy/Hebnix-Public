@@ -24,6 +24,129 @@ fn is_ball_backup(name: &str) -> bool {
         )
 }
 
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "hebnix-ball-delete-{:032x}",
+                rand::random::<u128>()
+            ));
+            fs::create_dir_all(root.join("balls/pack")).unwrap();
+            fs::write(root.join("balls/pack/texture.png"), b"texture").unwrap();
+            fs::write(
+                root.join("balls/pack/balls.json"),
+                r#"{
+                "First": {"Params": {"Diffuse": "texture.png"}},
+                "Second": {"Params": {"Diffuse": "texture.png"}}
+            }"#,
+            )
+            .unwrap();
+            Self(root)
+        }
+
+        fn state(&self) -> PatcherState {
+            let mut config = Config::default();
+            config.patcher.ball_source = PatchSource::Custom;
+            PatcherState::new(&self.0, &config)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn deleting_one_ball_preserves_other_entries_and_shared_texture() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let first = state
+            .balls
+            .iter()
+            .find(|ball| ball.name == "First")
+            .unwrap()
+            .clone();
+        state.delete_local_patch(&first).unwrap();
+        assert_eq!(state.balls.len(), 1);
+        assert_eq!(state.balls[0].name, "Second");
+        assert!(first.image_path.exists());
+        let second = state.balls[0].clone();
+        state.delete_local_patch(&second).unwrap();
+        assert!(state.balls.is_empty());
+        assert!(!second.json_path.exists());
+        assert!(!second.image_path.exists());
+        assert!(state.balls_dir.exists());
+    }
+
+    #[test]
+    fn applied_and_processing_balls_cannot_be_deleted() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let ball = state.balls[0].clone();
+        state.active_ball = Some(ball.name.clone());
+        assert!(state.delete_local_patch(&ball).is_err());
+        assert_eq!(state.active_ball.as_deref(), Some(ball.name.as_str()));
+        state.active_ball = None;
+        state.processing_target = Some("Global_Restore".into());
+        assert!(state.delete_local_patch(&ball).is_err());
+        assert!(ball.json_path.exists());
+        assert!(ball.image_path.exists());
+    }
+
+    #[test]
+    fn outside_texture_and_missing_manifest_fail_without_deleting_files() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let mut ball = state.balls[0].clone();
+        let outside = fixture.0.join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        ball.image_path = outside.clone();
+        assert!(state.delete_local_patch(&ball).is_err());
+        assert!(ball.json_path.exists());
+        assert!(outside.exists());
+        ball.json_path = fixture.0.join("balls/missing.json");
+        assert!(state.delete_local_patch(&ball).is_err());
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn current_ball_tab_renders_delete_confirmation() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let ball = state.balls[0].clone();
+        state.confirm_delete = Some(ball.clone());
+        let ctx = egui::Context::default();
+        let (tx, _) = crossbeam_channel::unbounded();
+        let mut config = Config::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                state.render_ball_tab(
+                    ui,
+                    &fixture.0,
+                    &fixture.0,
+                    &fixture.0,
+                    &tx,
+                    &ctx,
+                    &mut config,
+                );
+            });
+        });
+        assert!(
+            ctx.read_response(egui::Id::new("render-confirm-deletion"))
+                .is_some()
+        );
+        state.active_ball = Some(ball.name);
+        state.render_delete_confirmation(&ctx, &tx);
+        assert!(state.confirm_delete.is_none());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PatcherSubTab {
     Ball,
@@ -546,8 +669,74 @@ impl PatcherState {
                     self.render_ball_tab(ui, &cooked_pc, &upk_path, &backups_dir, tx, ctx, config)
                 }
             });
+    }
 
+    fn can_delete(&self, ball: &BallItem) -> bool {
+        self.processing_target.is_none() && self.active_ball.as_deref() != Some(ball.name.as_str())
+    }
+
+    fn delete_local_patch(&mut self, ball: &BallItem) -> Result<(), String> {
+        if !self.can_delete(ball) {
+            return Err(
+                "Restore the applied ball and wait for patching to finish before deleting".into(),
+            );
+        }
+        // Validate resolved paths before changing anything. Manifests can share
+        // textures or contain several balls, so never delete the whole folder.
+        let root = fs::canonicalize(&self.balls_dir).map_err(|e| e.to_string())?;
+        let manifest = fs::canonicalize(&ball.json_path).map_err(|e| e.to_string())?;
+        let image = fs::canonicalize(&ball.image_path).map_err(|e| e.to_string())?;
+        for path in [&manifest, &image] {
+            if !path.starts_with(&root) || !path.is_file() {
+                return Err("Refusing to delete files outside Hebnix's balls folder".into());
+            }
+        }
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let entries = json.as_object_mut().ok_or("Invalid ball manifest")?;
+        if entries.remove(&ball.name).is_none() {
+            return Err("Ball is no longer present in its manifest; refresh and try again".into());
+        }
+        let shared_image = self.balls.iter().any(|other| {
+            (other.json_path != ball.json_path || other.name != ball.name)
+                && fs::canonicalize(&other.image_path).ok().as_ref() == Some(&image)
+        });
+        let remove_manifest = entries.is_empty();
+        let result = (|| -> Result<(), String> {
+            if remove_manifest {
+                fs::remove_file(&manifest).map_err(|e| e.to_string())?;
+            } else {
+                fs::write(
+                    &manifest,
+                    serde_json::to_vec_pretty(&json).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if !shared_image && image != manifest {
+                fs::remove_file(&image).map_err(|e| e.to_string())?;
+            }
+            // Remove empty import wrappers, stopping at the balls directory.
+            let mut parent = manifest.parent();
+            while let Some(path) = parent {
+                if path == root || !path.starts_with(&root) || fs::remove_dir(path).is_err() {
+                    break;
+                }
+                parent = path.parent();
+            }
+            Ok(())
+        })();
+        self.refresh_balls();
+        result
+    }
+
+    fn render_delete_confirmation(&mut self, ctx: &egui::Context, tx: &Sender<AppMsg>) {
         if let Some(ball_to_delete) = self.confirm_delete.clone() {
+            // Recheck when an operation finishes while the dialog is open.
+            if !self.can_delete(&ball_to_delete) {
+                self.confirm_delete = None;
+                return;
+            }
             let mut close = false;
             egui::Window::new(t("render-confirm-deletion"))
                 .id(egui::Id::new("render-confirm-deletion"))
@@ -562,20 +751,16 @@ impl PatcherState {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button(t("plugin-delete-prompt-yes")).clicked() {
-                            let _ = fs::remove_file(&ball_to_delete.json_path);
-                            let _ = fs::remove_file(&ball_to_delete.image_path);
-
-                            if self.active_ball.as_deref() == Some(ball_to_delete.name.as_str()) {
-                                self.active_ball = None;
-                                config.patcher.active_ball = None;
-                                let _ = config.save(&self.base_dir);
-                            }
-
-                            self.refresh_balls();
-                            let _ = tx.send(AppMsg::Log(format!(
-                                "[Patcher] Deleted ball '{}'",
-                                ball_to_delete.name
-                            )));
+                            let message = match self.delete_local_patch(&ball_to_delete) {
+                                Ok(()) => {
+                                    format!("[Patcher] Deleted ball '{}'", ball_to_delete.name)
+                                }
+                                Err(error) => format!(
+                                    "[Patcher] Could not delete ball '{}': {error}",
+                                    ball_to_delete.name
+                                ),
+                            };
+                            let _ = tx.send(AppMsg::Log(message));
                             close = true;
                         }
                         if ui.button(t("plugin-delete-prompt-no")).clicked() {
@@ -636,6 +821,8 @@ impl PatcherState {
         if received_patcher_op {
             ctx.request_repaint();
         }
+
+        self.render_delete_confirmation(ctx, tx);
 
         ui.heading(t("app-ball-patcher"));
         ui.add_space(8.0);
@@ -853,7 +1040,7 @@ impl PatcherState {
                                         }
                                         if ui
                                             .add_enabled(
-                                                !busy,
+                                                self.can_delete(ball),
                                                 egui::Button::new(t("presets-delete"))
                                                     .fill(egui::Color32::from_rgb(180, 50, 50))
                                                     .min_size(egui::vec2(

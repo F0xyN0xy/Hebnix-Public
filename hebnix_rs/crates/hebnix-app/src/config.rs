@@ -181,6 +181,22 @@ fn default_replay_naming_template() -> String {
     "Hebnix - {gamemode} - {date} {time24}".to_string()
 }
 
+impl ReplayUploadCfg {
+    pub fn enabled_for_spoofer(&self, spoofer_enabled: bool) -> bool {
+        spoofer_enabled && (self.upload_enabled || self.save_locally)
+    }
+
+    /// Disable capture preferences without discarding upload credentials/settings.
+    pub fn enforce_spoofer(&mut self, spoofer_enabled: bool) -> bool {
+        let changed = !spoofer_enabled && (self.upload_enabled || self.save_locally);
+        if !spoofer_enabled {
+            self.upload_enabled = false;
+            self.save_locally = false;
+        }
+        changed
+    }
+}
+
 impl Default for ReplayUploadCfg {
     fn default() -> Self {
         Self {
@@ -459,4 +475,30 @@ fn parse_ini_bool(v: &str, default: bool) -> bool {
 /// App root dir: `%AppData%\Hebnix`, or `HEBNIX_BASE_DIR` for dev runs.
 pub fn base_dir() -> PathBuf {
     hebnix_sdk::utils::paths::base_dir()
+}
+
+#[cfg(test)]
+mod replay_dependency_tests {
+    use super::ReplayUploadCfg;
+    #[test]
+    fn replay_preferences_require_spoofer_and_preserve_other_settings() {
+        for (save, upload) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut config = ReplayUploadCfg {
+                save_locally: save,
+                upload_enabled: upload,
+                api_key: "keep-key".into(),
+                save_directory: "keep-directory".into(),
+                ..Default::default()
+            };
+            assert_eq!(config.enabled_for_spoofer(true), save || upload);
+            assert!(!config.enabled_for_spoofer(false));
+            assert!(!config.enforce_spoofer(true));
+            assert_eq!((config.save_locally, config.upload_enabled), (save, upload));
+            assert_eq!(config.enforce_spoofer(false), save || upload);
+            assert!(!config.save_locally && !config.upload_enabled);
+            assert_eq!(config.api_key, "keep-key");
+            assert_eq!(config.save_directory, "keep-directory");
+            assert!(!config.enabled_for_spoofer(true));
+        }
+    }
 }

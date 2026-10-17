@@ -111,6 +111,20 @@ impl AutoUploadReplays {
         self.status = "Stopped".to_string();
     }
 
+    pub fn needs_match_identity(&self, match_guid: Option<&str>) -> bool {
+        self.running
+            && match_guid
+                .filter(|guid| !guid.trim().is_empty())
+                .is_some_and(|guid| {
+                    let guid = normalize_guid(guid);
+                    !self.submitted.contains(&guid)
+                        && self
+                            .current_match
+                            .as_ref()
+                            .is_none_or(|tracked| tracked.match_guid != guid)
+                })
+    }
+
     pub fn track_match(&mut self, match_guid: &str, player_id: Option<String>) {
         if !self.running || match_guid.trim().is_empty() {
             return;
@@ -730,4 +744,37 @@ fn visibility(value: &str) -> &'static str {
 
 fn normalize_guid(value: &str) -> String {
     value.trim().to_ascii_uppercase()
+}
+
+#[cfg(test)]
+mod replay_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn disabling_capture_cancels_pending_replay_jobs() {
+        // new only reads history; this test never writes files or uses the network.
+        let mut uploader =
+            AutoUploadReplays::new(&std::env::temp_dir().join("hebnix-replay-dependency-test"));
+        uploader.sync(true, false, false);
+        assert!(!uploader.running());
+        assert_eq!(uploader.status, "Waiting for Rocket League");
+        uploader.sync(true, true, false);
+        assert!(!uploader.running());
+        uploader.sync(true, true, true);
+        assert!(uploader.running());
+        assert!(uploader.needs_match_identity(Some("test-guid")));
+        uploader.track_match("test-guid", Some("test-player".into()));
+        assert!(!uploader.needs_match_identity(Some("test-guid")));
+        uploader.pending.insert("test-guid".into());
+        let generation = uploader.generation.load(Ordering::Acquire);
+        uploader.sync(false, true, true);
+        assert!(!uploader.running());
+        assert!(uploader.current_match.is_none() && uploader.pending.is_empty());
+        assert!(uploader.generation.load(Ordering::Acquire) > generation);
+        assert_eq!(uploader.status, "Disabled");
+        assert!(!uploader.needs_match_identity(Some("test-guid")));
+        uploader.sync(true, true, true);
+        assert!(uploader.needs_match_identity(Some("test-guid")));
+        uploader.submitted.insert(normalize_guid("test-guid"));
+        assert!(!uploader.needs_match_identity(Some("test-guid")));
+    }
 }

@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "hebnix-app"
-version = "2.2.3"
+version = "2.2.4"
 dependencies = [
  "aes",
  "base64 0.21.7",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "hebnix-sdk"
-version = "0.1.0"
+version = "2.2.4"
 dependencies = [
  "aes",
  "crossbeam-channel",

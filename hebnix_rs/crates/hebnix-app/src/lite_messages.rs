@@ -4,6 +4,7 @@ use serde_json::Value;
 
 #[derive(Debug)]
 pub enum AppMsg {
+    NotificationFetched(crate::notifications::Notification),
     Log(String),
     GameEvent(StatsEvent),
     RlStatus {

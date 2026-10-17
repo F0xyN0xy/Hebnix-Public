@@ -27,7 +27,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.2.3";
+pub const APP_VERSION: &str = "2.2.4";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -1033,8 +1033,7 @@ impl HebnixApp {
             spoofer_rank_enabled,
             spoofer_ranks,
             spoofer_cert_installed: cert_installed,
-            spoofer_certificate_prompt_open: spoofer_master
-                && !cert_installed,
+            spoofer_certificate_prompt_open: spoofer_master && !cert_installed,
             spoofer_friends_enabled,
             spoofer_friends,
             friends_search: String::new(),
@@ -1132,6 +1131,9 @@ impl HebnixApp {
     }
 
     fn save_config(&mut self) {
+        self.config
+            .replay_upload
+            .enforce_spoofer(self.spoofer_master);
         if let Err(e) = self.config.save(&self.base_dir) {
             self.console
                 .write(format!("[Console] Failed to save config: {e}"));
@@ -1281,18 +1283,23 @@ impl HebnixApp {
         let options_were_enabled = self.replay_options_enabled();
 
         let mut config_changed = false;
-        config_changed |= ui
-            .checkbox(
-                &mut self.config.replay_upload.save_locally,
-                "Save replays locally",
-            )
-            .changed();
-        config_changed |= ui
-            .checkbox(
-                &mut self.config.replay_upload.upload_enabled,
-                "Upload to ballchasing.com",
-            )
-            .changed();
+        if !self.spoofer_master {
+            ui.weak("Enable Spoofer in Spoofer → Settings to save or upload replays.");
+        }
+        ui.add_enabled_ui(self.spoofer_master, |ui| {
+            config_changed |= ui
+                .checkbox(
+                    &mut self.config.replay_upload.save_locally,
+                    "Save replays locally",
+                )
+                .changed();
+            config_changed |= ui
+                .checkbox(
+                    &mut self.config.replay_upload.upload_enabled,
+                    "Upload to ballchasing.com",
+                )
+                .changed();
+        });
         ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Provider:");
@@ -1391,44 +1398,68 @@ impl HebnixApp {
     ) {
         self.patcher_ball.poll_ops(&self.tx, ctx, &mut self.config);
         self.patcher_boost.poll_ops(&self.tx, &mut self.config);
-        self.patcher_decal.handle_op_result(&self.tx, &mut self.config);
+        self.patcher_decal
+            .handle_op_result(&self.tx, &mut self.config);
         if self.patcher_ball.processing_target.is_none()
             && self.patcher_ball.active_ball.is_none()
             && let Some(name) = self.presets.pending_ball.take()
-            && let Err(error) = self.patcher_ball.begin_apply_named(
-                &name, cooked_pc, backups_dir, &self.tx, ctx,
-            )
+            && let Err(error) =
+                self.patcher_ball
+                    .begin_apply_named(&name, cooked_pc, backups_dir, &self.tx, ctx)
         {
-            self.presets.status.push_str(&format!("\nSkipped ball '{name}': {error}"));
-            self.presets.missing.push(crate::presets::MissingItem::Patch {
-                kind: "ball".into(), key: None,
-            });
+            self.presets
+                .status
+                .push_str(&format!("\nSkipped ball '{name}': {error}"));
+            self.presets
+                .missing
+                .push(crate::presets::MissingItem::Patch {
+                    kind: "ball".into(),
+                    key: None,
+                });
         }
         if self.patcher_boost.processing_target.is_none()
             && self.patcher_boost.active_boost.is_none()
             && let Some(name) = self.presets.pending_boost.take()
-            && let Err(error) = self.patcher_boost.begin_apply_named(
-                &name, cooked_pc, backups_dir, &self.tx, ctx,
-            )
+            && let Err(error) =
+                self.patcher_boost
+                    .begin_apply_named(&name, cooked_pc, backups_dir, &self.tx, ctx)
         {
-            self.presets.status.push_str(&format!("\nSkipped boost '{name}': {error}"));
-            self.presets.missing.push(crate::presets::MissingItem::Patch {
-                kind: "boost".into(), key: None,
-            });
+            self.presets
+                .status
+                .push_str(&format!("\nSkipped boost '{name}': {error}"));
+            self.presets
+                .missing
+                .push(crate::presets::MissingItem::Patch {
+                    kind: "boost".into(),
+                    key: None,
+                });
         }
-        if self.patcher_decal.processing_target.is_none() && !self.presets.pending_decals.is_empty() {
+        if self.patcher_decal.processing_target.is_none() && !self.presets.pending_decals.is_empty()
+        {
             let (key, name) = self.presets.pending_decals.remove(0);
             let (car, skin) = key
                 .split_once('|')
                 .map(|(car, skin)| (car.to_string(), skin.to_string()))
                 .unwrap_or_default();
             if let Err(error) = self.patcher_decal.apply_decal_to_skin(
-                &name, &car, &skin, 1.0, cooked_pc, backups_dir, &self.tx, ctx,
+                &name,
+                &car,
+                &skin,
+                1.0,
+                cooked_pc,
+                backups_dir,
+                &self.tx,
+                ctx,
             ) {
-                self.presets.status.push_str(&format!("\nSkipped decal '{name}': {error}"));
-                self.presets.missing.push(crate::presets::MissingItem::Patch {
-                    kind: "decals".into(), key: Some(key),
-                });
+                self.presets
+                    .status
+                    .push_str(&format!("\nSkipped decal '{name}': {error}"));
+                self.presets
+                    .missing
+                    .push(crate::presets::MissingItem::Patch {
+                        kind: "decals".into(),
+                        key: Some(key),
+                    });
             }
         }
     }
@@ -1442,14 +1473,22 @@ impl HebnixApp {
         if crate::messages::block_item_action_if_game_running(&self.tx) {
             return;
         }
-        let Some(preset) = self.presets.presets.get(self.presets.selected).cloned() else { return };
+        let Some(preset) = self.presets.presets.get(self.presets.selected).cloned() else {
+            return;
+        };
         self.presets.missing.clear();
         self.presets.pending_ball = None;
         self.presets.pending_boost = None;
         self.presets.pending_decals.clear();
-        let swap_report = self.swapper.apply_preset_swaps(&preset.swaps, cooked_pc, backups_dir);
+        let swap_report = self
+            .swapper
+            .apply_preset_swaps(&preset.swaps, cooked_pc, backups_dir);
         self.presets.missing.extend(
-            swap_report.skipped_indexes.iter().copied().map(crate::presets::MissingItem::Swap),
+            swap_report
+                .skipped_indexes
+                .iter()
+                .copied()
+                .map(crate::presets::MissingItem::Swap),
         );
         let mut messages = swap_report.skipped;
         let mut queued = 0usize;
@@ -1458,56 +1497,113 @@ impl HebnixApp {
             if let Some(name) = patches.and_then(|p| p.get("ball")).and_then(|v| v.as_str()) {
                 if !self.patcher_ball.balls.iter().any(|item| item.name == name) {
                     messages.push(format!("Ball '{name}' is not installed locally"));
-                    self.presets.missing.push(crate::presets::MissingItem::Patch { kind: "ball".into(), key: None });
+                    self.presets
+                        .missing
+                        .push(crate::presets::MissingItem::Patch {
+                            kind: "ball".into(),
+                            key: None,
+                        });
                 } else if self.patcher_ball.active_ball.is_some() {
                     self.presets.pending_ball = Some(name.to_string());
-                    self.patcher_ball.begin_restore(cooked_pc, backups_dir, &self.tx, ctx);
+                    self.patcher_ball
+                        .begin_restore(cooked_pc, backups_dir, &self.tx, ctx);
                     queued += 1;
-                } else if let Err(error) = self.patcher_ball.begin_apply_named(name, cooked_pc, backups_dir, &self.tx, ctx) {
+                } else if let Err(error) =
+                    self.patcher_ball
+                        .begin_apply_named(name, cooked_pc, backups_dir, &self.tx, ctx)
+                {
                     messages.push(error);
                 } else {
                     queued += 1;
                 }
             }
-            if let Some(name) = patches.and_then(|p| p.get("boost")).and_then(|v| v.as_str()) {
-                if !self.patcher_boost.boosts.iter().any(|item| item.name == name) {
+            if let Some(name) = patches
+                .and_then(|p| p.get("boost"))
+                .and_then(|v| v.as_str())
+            {
+                if !self
+                    .patcher_boost
+                    .boosts
+                    .iter()
+                    .any(|item| item.name == name)
+                {
                     messages.push(format!("Boost '{name}' is not installed locally"));
-                    self.presets.missing.push(crate::presets::MissingItem::Patch { kind: "boost".into(), key: None });
+                    self.presets
+                        .missing
+                        .push(crate::presets::MissingItem::Patch {
+                            kind: "boost".into(),
+                            key: None,
+                        });
                 } else if self.patcher_boost.active_boost.is_some() {
                     self.presets.pending_boost = Some(name.to_string());
-                    self.patcher_boost.begin_restore(cooked_pc, backups_dir, &self.tx, ctx);
+                    self.patcher_boost
+                        .begin_restore(cooked_pc, backups_dir, &self.tx, ctx);
                     queued += 1;
-                } else if let Err(error) = self.patcher_boost.begin_apply_named(name, cooked_pc, backups_dir, &self.tx, ctx) {
+                } else if let Err(error) = self.patcher_boost.begin_apply_named(
+                    name,
+                    cooked_pc,
+                    backups_dir,
+                    &self.tx,
+                    ctx,
+                ) {
                     messages.push(error);
                 } else {
                     queued += 1;
                 }
             }
-            if let Some(decals) = patches.and_then(|p| p.get("decals")).and_then(|v| v.as_object()) {
+            if let Some(decals) = patches
+                .and_then(|p| p.get("decals"))
+                .and_then(|v| v.as_object())
+            {
                 for (key, value) in decals {
                     let Some(name) = value.as_str() else { continue };
                     let Some((car, skin)) = key.split_once('|') else {
                         messages.push(format!("Decal '{name}' has an invalid target"));
-                        self.presets.missing.push(crate::presets::MissingItem::Patch { kind: "decals".into(), key: Some(key.clone()) });
+                        self.presets
+                            .missing
+                            .push(crate::presets::MissingItem::Patch {
+                                kind: "decals".into(),
+                                key: Some(key.clone()),
+                            });
                         continue;
                     };
                     if self.patcher_decal.preset_item_available(name, car, skin) {
                         self.presets.pending_decals.push((key.clone(), name.into()));
                         queued += 1;
                     } else {
-                        messages.push(format!("Decal '{name}' or its target '{key}' is not installed locally"));
-                        self.presets.missing.push(crate::presets::MissingItem::Patch { kind: "decals".into(), key: Some(key.clone()) });
+                        messages.push(format!(
+                            "Decal '{name}' or its target '{key}' is not installed locally"
+                        ));
+                        self.presets
+                            .missing
+                            .push(crate::presets::MissingItem::Patch {
+                                kind: "decals".into(),
+                                key: Some(key.clone()),
+                            });
                     }
                 }
             }
-            if let Some(cars) = patches.and_then(|p| p.get("cars")).and_then(|v| v.as_object()) {
+            if let Some(cars) = patches
+                .and_then(|p| p.get("cars"))
+                .and_then(|v| v.as_object())
+            {
                 for (target, value) in cars {
                     let Some(name) = value.as_str() else { continue };
                     if let Err(error) = self.patcher_car.apply_preset(
-                        name, target, cooked_pc, backups_dir, &self.tx, &mut self.config,
+                        name,
+                        target,
+                        cooked_pc,
+                        backups_dir,
+                        &self.tx,
+                        &mut self.config,
                     ) {
                         messages.push(format!("Car '{name}': {error}"));
-                        self.presets.missing.push(crate::presets::MissingItem::Patch { kind: "cars".into(), key: Some(target.clone()) });
+                        self.presets
+                            .missing
+                            .push(crate::presets::MissingItem::Patch {
+                                kind: "cars".into(),
+                                key: Some(target.clone()),
+                            });
                     } else {
                         queued += 1;
                     }
@@ -1515,7 +1611,8 @@ impl HebnixApp {
             }
         }
         self.presets.status = format!(
-            "Applied {} swap(s); queued/applied {queued} patch item(s).", swap_report.applied
+            "Applied {} swap(s); queued/applied {queued} patch item(s).",
+            swap_report.applied
         );
         if !messages.is_empty() {
             self.presets.status.push_str("\nSkipped items:\n- ");
@@ -1589,7 +1686,12 @@ impl HebnixApp {
         if self.presets.presets.is_empty() {
             ui.weak(t("presets-no-presets-saved"));
         } else {
-            let names: Vec<String> = self.presets.presets.iter().map(|p| p.name.clone()).collect();
+            let names: Vec<String> = self
+                .presets
+                .presets
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
             egui::ComboBox::from_id_salt("preset_select")
                 .selected_text(&names[self.presets.selected])
                 .show_ui(ui, |ui| {
@@ -1623,8 +1725,14 @@ impl HebnixApp {
                 let mut remove_swap = None;
                 for (index, swap) in draft.swaps.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        let source = swap.get("source_name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let target = swap.get("target_name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let source = swap
+                            .get("source_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let target = swap
+                            .get("target_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
                         ui.label(source);
                         let arrow =
                             ui.allocate_response(egui::vec2(18.0, 18.0), egui::Sense::hover());
@@ -1645,10 +1753,14 @@ impl HebnixApp {
                             visuals.fg_stroke,
                         );
                         ui.label(target);
-                        if ui.small_button("Remove").clicked() { remove_swap = Some(index); }
+                        if ui.small_button("Remove").clicked() {
+                            remove_swap = Some(index);
+                        }
                     });
                 }
-                if let Some(index) = remove_swap { draft.swaps.remove(index); }
+                if let Some(index) = remove_swap {
+                    draft.swaps.remove(index);
+                }
                 let mut remove_patch = None;
                 if let Some(patches) = draft.patches.as_object() {
                     for (kind, value) in patches {
@@ -1656,13 +1768,17 @@ impl HebnixApp {
                             for (key, item) in entries {
                                 ui.horizontal(|ui| {
                                     ui.label(format!("{kind} / {key}: {item}"));
-                                    if ui.small_button("Remove").clicked() { remove_patch = Some((kind.clone(), Some(key.clone()))); }
+                                    if ui.small_button("Remove").clicked() {
+                                        remove_patch = Some((kind.clone(), Some(key.clone())));
+                                    }
                                 });
                             }
                         } else if !value.is_null() {
                             ui.horizontal(|ui| {
                                 ui.label(format!("{kind}: {value}"));
-                                if ui.small_button("Remove").clicked() { remove_patch = Some((kind.clone(), None)); }
+                                if ui.small_button("Remove").clicked() {
+                                    remove_patch = Some((kind.clone(), None));
+                                }
                             });
                         }
                     }
@@ -1670,15 +1786,23 @@ impl HebnixApp {
                 if let Some((kind, key)) = remove_patch {
                     if let Some(patches) = draft.patches.as_object_mut() {
                         if let Some(key) = key {
-                            if let Some(entries) = patches.get_mut(&kind).and_then(|v| v.as_object_mut()) { entries.remove(&key); }
-                        } else { patches.remove(&kind); }
+                            if let Some(entries) =
+                                patches.get_mut(&kind).and_then(|v| v.as_object_mut())
+                            {
+                                entries.remove(&key);
+                            }
+                        } else {
+                            patches.remove(&kind);
+                        }
                     }
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Save Changes").clicked() {
                         save_edit = true;
                     }
-                    if ui.button("Cancel").clicked() { cancel_edit = true; }
+                    if ui.button("Cancel").clicked() {
+                        cancel_edit = true;
+                    }
                 });
             });
         }
@@ -1746,7 +1870,9 @@ impl HebnixApp {
             ui.horizontal(|ui| {
                 if ui.button("Remove Missing Items from Preset").clicked()
                     && let Err(error) = self.presets.remove_missing_selected()
-                { self.presets.status = error; }
+                {
+                    self.presets.status = error;
+                }
                 if ui.button("Ignore Missing Items").clicked() {
                     self.presets.missing.clear();
                     self.presets.status.clear();
@@ -1756,9 +1882,19 @@ impl HebnixApp {
         ui.separator();
         ui.strong("Preset Key");
         ui.label("Share or paste a base64 preset key. Imported items remain listed even when their local files are missing.");
-        ui.add(egui::TextEdit::multiline(&mut self.presets.preset_key).desired_rows(3).desired_width(f32::INFINITY));
+        ui.add(
+            egui::TextEdit::multiline(&mut self.presets.preset_key)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.presets.presets.is_empty(), egui::Button::new("Show Preset Key")).clicked() {
+            if ui
+                .add_enabled(
+                    !self.presets.presets.is_empty(),
+                    egui::Button::new("Show Preset Key"),
+                )
+                .clicked()
+            {
                 match self.presets.selected_key() {
                     Ok(key) => self.presets.preset_key = key,
                     Err(error) => self.presets.status = error,
@@ -1767,7 +1903,11 @@ impl HebnixApp {
             if ui.button("Import Preset").clicked() {
                 let key = self.presets.preset_key.clone();
                 match self.presets.import_key(&key) {
-                    Ok(()) => self.presets.status = "Preset imported. Missing local items will be skipped when applied.".into(),
+                    Ok(()) => {
+                        self.presets.status =
+                            "Preset imported. Missing local items will be skipped when applied."
+                                .into()
+                    }
                     Err(error) => self.presets.status = error,
                 }
             }
@@ -1832,16 +1972,28 @@ impl HebnixApp {
     }
 
     fn replay_options_enabled(&self) -> bool {
-        self.config.replay_upload.upload_enabled || self.config.replay_upload.save_locally
+        self.config
+            .replay_upload
+            .enabled_for_spoofer(self.spoofer_master)
     }
 
     fn sync_proxy_consumers(&mut self) {
+        if self
+            .config
+            .replay_upload
+            .enforce_spoofer(self.spoofer_master)
+        {
+            self.auto_upload_replays.stop();
+            self.save_config();
+        }
         self.spoofer_mgr.configure(self.proxy_options());
         let session = hebnix_sdk::rlapi::session::shared_game_session();
         self.auto_upload_replays.sync(
             self.replay_options_enabled() && !self.epic_repair.running,
             self.spoofer_mgr.game_running(),
-            session.enabled(),
+            session.enabled()
+                && self.spoofer_mgr.http_running()
+                && self.spoofer_mgr.socket_running(),
         );
     }
 
@@ -1858,6 +2010,7 @@ impl HebnixApp {
                     || self.swapper.owned_only()),
             replays: self.replay_options_enabled(),
         }
+        .paired()
     }
 
     fn evaluate_proxies(&mut self) {
@@ -2630,15 +2783,15 @@ impl HebnixApp {
                 if let Some(state) = event.update_state() {
                     self.workshop
                         .update_workshop_map_from_stats(&state.game.arena, &self.tx);
+                    let log = (entered_match || self.auto_upload_replays.needs_match_identity(event.match_guid.as_deref()))
+                        .then(|| hebnix_sdk::log::parse_launch_log(None, true, "INT"));
+                    if let (Some(match_guid), Some(log)) = (event.match_guid.as_deref(), log.as_ref()) {
+                        self.auto_upload_replays.track_match(match_guid, log.session.primary_id.clone());
+                    }
                     if entered_match {
-                        let log = hebnix_sdk::log::parse_launch_log(None, true, "INT");
-                        if let Some(match_guid) = event.match_guid.as_deref() {
-                            self.auto_upload_replays
-                                .track_match(match_guid, log.session.primary_id.clone());
-                        }
                         self.discord_match = Some(crate::discord_presence::MatchInfo::from_state(
                             state,
-                            log.game.as_ref(),
+                            log.as_ref().and_then(|log| log.game.as_ref()),
                         ));
                     } else if let Some(info) = self.discord_match.as_mut() {
                         info.update_state(state);
@@ -3368,9 +3521,10 @@ impl HebnixApp {
                             ui.scope(|ui| {
                                 let options = self.proxy_options();
                                 let game_running = self.spoofer_mgr.game_running();
+                                let proxies_running = self.spoofer_mgr.http_running() && self.spoofer_mgr.socket_running();
                                 ui.horizontal(|ui| {
                                     ui.label(t("spoofer-account-proxy"));
-                                    if self.spoofer_mgr.http_running() {
+                                    if proxies_running {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
                                             t("spoofer-running"),
@@ -3393,9 +3547,7 @@ impl HebnixApp {
 
                                 ui.horizontal(|ui| {
                                     ui.label(t("spoofer-psynet-proxy"));
-                                    if self.spoofer_mgr.socket_running()
-                                        || hebnix_sdk::rlapi::session::shared_game_session().enabled()
-                                    {
+                                    if proxies_running {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(34, 245, 101),
                                             t("spoofer-running"),
@@ -5668,7 +5820,8 @@ impl HebnixApp {
         match self.spoofer_mgr.finish_item_clear() {
             Ok(true) => {
                 self.item_clear_error = None;
-                self.console.write(&format!("[Items] {}", self.spoofer_mgr.item_status().text));
+                self.console
+                    .write(&format!("[Items] {}", self.spoofer_mgr.item_status().text));
             }
             Ok(false) => {
                 self.item_clear_error = None;
@@ -6110,45 +6263,10 @@ impl HebnixApp {
     }
 
     fn render_notification_popup(&mut self, ctx: &egui::Context) {
-        let Some(notification) = self.notification_popup.clone() else {
+        let Some(notification) = self.notification_popup.as_ref() else {
             return;
         };
-        let mut dismissed = false;
-        let id = egui::Id::new("web_notification");
-        egui::Modal::new(id).show(ctx, |ui| {
-            ui.set_width(440.0_f32.min((ctx.content_rect().width() - 48.0).max(120.0)));
-            ui.horizontal(|ui| {
-                ui.heading("Notification");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    dismissed |= ui.button("×").on_hover_text("Dismiss").clicked();
-                });
-            });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height((ctx.content_rect().height() * 0.6).max(80.0))
-                .show(ui, |ui| {
-                    ui.add(egui::Label::new(&notification.message).wrap());
-                });
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if let Some(url) = notification.link_url() {
-                    let text = notification
-                        .link_text
-                        .as_deref()
-                        .filter(|text| !text.trim().is_empty())
-                        .unwrap_or("Open link");
-                    if ui.button(text).clicked() {
-                        let _ = open::that(url.as_str());
-                    }
-                }
-                dismissed |= ui.button("Dismiss").clicked();
-            });
-        });
-        let layer = egui::LayerId::new(egui::Order::Foreground, id);
-        ctx.move_to_top(layer);
-        ctx.memory_mut(|memory| memory.set_modal_layer(layer));
-        // Ignore backdrop clicks/Escape: the announcement stays until explicitly closed.
-        if dismissed {
+        if crate::notifications::render_popup(ctx, notification) {
             self.config.notification_id = self.config.notification_id.max(notification.id);
             self.save_config();
             self.notification_popup = None;
@@ -6952,8 +7070,8 @@ impl HebnixApp {
                 active_plugins.push((plugin.slug.clone(), win));
             }
         }
-        let focus_ok = hebnix_sdk::process::is_rocket_league_focused()
-            || winutil::foreground_window_is_ours();
+        let focus_ok =
+            hebnix_sdk::process::is_rocket_league_focused() || winutil::foreground_window_is_ours();
 
         for (slug, win) in active_plugins {
             let viewport_id = egui::ViewportId::from_hash_of(("plugin_window", &slug));
