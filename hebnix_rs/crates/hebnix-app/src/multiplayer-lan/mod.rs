@@ -1,27 +1,31 @@
-mod beacon;
+//! Workshop LAN multiplayer over tailcat.
+//!
+//! Every player's `hebnix-tc.exe` sidecar (tailcat_sidecar.rs) announces
+//! itself to the Hebnix directory and connects to every other player there,
+//! peer to peer or through relay servers, so everyone sees everyone's LAN
+//! matches. The sidecars proxy Rocket League's LAN discovery and game
+//! traffic over loopback, so RL runs without `-multihome` (online play keeps
+//! working) and nothing needs administrator rights, a network adapter or a
+//! Windows service. Map sync (map_sync.rs) runs over the same connections.
+//! Only the LAN chat capture still needs administrator rights (WinDivert).
+
 mod chat_capture;
-mod direct_udp;
-mod dns_cleanup;
 mod firewall;
 mod hosting;
+mod legacy_cleanup;
 mod map_sync;
 mod models;
+mod raw_capture;
 mod room_api;
-mod tsnet_sidecar;
+mod tailcat_sidecar;
 
 use std::time::Duration;
 
-pub use direct_udp::TunnelStats;
-pub use dns_cleanup::clean_stale_nrpt_rule;
-pub use firewall::{
-    ensure_beacon_relay_rule, ensure_map_sync_rule, ensure_rocket_league_lan_rule,
-    ensure_sidecar_rule,
-};
-// "host" and "join" only mean something inside Rocket League's own UI now -
-// every peer runs the same relay (see hosting.rs), so there's just the one
-// session type
 pub use chat_capture::{ChatCapture, ChatMessage};
+pub use firewall::ensure_sidecar_rule;
+// one session type, see hosting.rs
 pub use hosting::HostSession;
+pub use legacy_cleanup::{clean_stale_nrpt_rule, remove_legacy_service};
 pub use map_sync::{
     LocalInfo, MAP_SYNC_PORT, MAX_MAP_BYTES, MapFileProvider, MapProvider, PeerOffer, SlotMap,
     TransferProgress, fetch_map_file, hash_file, is_local_map_id, local_map_id, valid_map_id,
@@ -30,53 +34,43 @@ pub use models::{
     CreateRoomRequest, JoinRoomRequest, JoinedRoom, LeaveRoomRequest, Room, RoomCredentials,
     UpdatePlayerRequest,
 };
-pub use tsnet_sidecar::{PeerInfo, TsState, TsnetSidecarHandle, find_sidecar_dir, redact};
+pub use tailcat_sidecar::{PeerLink, TailcatSidecarHandle, redact};
 
-mod hs_auth {
-    include!(concat!(env!("OUT_DIR"), "/hs_key.rs"));
+mod directory_auth {
+    include!(concat!(env!("OUT_DIR"), "/directory_key.rs"));
 }
 
-pub fn tailnet_auth_key() -> Result<&'static str, String> {
-    let key = hs_auth::KEY.trim();
+/// where every player's sidecar announces itself and finds the others
+/// (sidecar/directory)
+pub const DIRECTORY_URL: &str = "https://mp.hebnix.com/directory";
+
+/// DIRECTORY_URL, unless `HEBNIX_DIRECTORY_URL` points somewhere else (a
+/// test or self-hosted directory)
+pub fn directory_url() -> String {
+    std::env::var("HEBNIX_DIRECTORY_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DIRECTORY_URL.to_string())
+}
+
+/// the directory's shared key, baked in at build time
+/// (`directory_key.txt` at the repository root, or the `HEBNIX_DIRECTORY_KEY`
+/// env var in CI)
+pub fn directory_key() -> Result<&'static str, String> {
+    let key = directory_auth::KEY.trim();
     if key.is_empty() {
-        Err("Headscale auth key is missing; add hs_key.txt at the repository root and rebuild Hebnix.".into())
+        Err("The multiplayer directory key is missing; add directory_key.txt at the repository root and rebuild Hebnix.".into())
     } else {
         Ok(key)
     }
 }
 
-/// Headscale coordination server for Workshop multiplayer.
-pub const TSNET_CONTROL_URL: &str = "https://mp.hebnix.com";
-
-/// Rocket League's actual game traffic port. This is the value rewritten
-/// *inside* the beacon payload (the "join me at ip:port" the packet
-/// advertises) and what guests' `-multihome` sockets receive game traffic
-/// on -- Hebnix never relays this port directly, RL talks it peer to peer
-/// once `-multihome` is set.
+/// Rocket League's LAN game port. Another player's sidecar alias proxies
+/// alias:RL_LAN_PORT to theirs, and chat_capture.rs watches it.
 pub const RL_LAN_PORT: u16 = 7777;
 
-/// Rocket League's LAN *discovery* broadcast ports -- confirmed empirically
-/// against a real match that a single port (14777 alone) isn't enough, RL
-/// spreads its discovery beacon across 14000-14010 too. Distinct from
-/// RL_LAN_PORT above (the port advertised inside that beacon's payload for
-/// the real game connection) -- the beacon relay binds one socket per port
-/// here and relays whatever it captures back out on the same port.
-pub const RL_DISCOVERY_PORTS: &[u16] = &[
-    14000, 14001, 14002, 14003, 14004, 14005, 14006, 14007, 14008, 14009, 14010, 14777,
-];
-
-pub const PACKET_PUMP_INTERVAL: Duration = Duration::from_millis(50);
-/// how often the beacon relay re-fetches the tailnet's peer list to know
-/// who to relay captured beacons to. This used to be 300s, left over from
-/// when it was a room heartbeat rather than "who's actually online right
-/// now" -- confirmed live that this left the relay with an empty peer list
-/// (and so nothing to relay to) for the first 5 minutes of every session.
-/// The peer list is also fetched once up front before the relay loop
-/// starts at all, rather than waiting for the first tick of this interval.
-pub const PEER_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 /// how long a session stays alive after Rocket League exits before Hebnix
-/// tears the room/tailnet down for real -- covers an ordinary crash/restart
-/// without kicking everyone out of the room.
+/// tears it down for real -- covers an ordinary crash/restart.
 pub const CRASH_GRACE_WINDOW: Duration = Duration::from_secs(90);
 
 pub fn cleanup_system_state() -> Result<(), String> {

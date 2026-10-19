@@ -57,12 +57,11 @@ pub enum AppMsg {
     MenuMapDone(Result<String, String>),
     BackgroundChangerProgress(String),
     WorkshopMultiplayerProgress(String),
-    // result of spawning the tsnet sidecar and requesting the tailnet come up
+    // result of starting the multiplayer sidecar and its first announce
     WorkshopTailnetStarted {
-        result: Result<std::sync::Arc<crate::multiplayer_lan::TsnetSidecarHandle>, String>,
+        result: Result<std::sync::Arc<crate::multiplayer_lan::TailcatSidecarHandle>, String>,
     },
-    // result of launching Rocket League with the tailnet multihome address
-    // (and, for a guest, joining the room first)
+    // result of starting Rocket League for Workshop multiplayer
     WorkshopMultiplayerLaunched {
         result: Result<(), String>,
     },
@@ -179,22 +178,16 @@ pub enum AppMsg {
         result: Result<String, String>,
     },
     SendWsCommand(hebnix_sdk::stats::websocket::WsCommand),
-    // result of a "bring the tailnet up" request to the tsnet sidecar
-    TsnetUpResult {
-        result: Result<String, String>,
-    },
-    TsnetStatus {
-        state: crate::multiplayer_lan::TsState,
-        tailnet_ip: Option<String>,
-        peers: Vec<crate::multiplayer_lan::PeerInfo>,
-    },
-    TsnetPeerEvent {
+    // another player turned Workshop multiplayer on or off
+    TailcatPeer {
+        name: String,
         online: bool,
-        tailnet_ip: String,
     },
-    TsnetDownResult {
-        ok: bool,
+    // every few seconds from the multiplayer sidecar: every other player's
+    // connection path and ping
+    TailcatStatus {
+        peers: Vec<crate::multiplayer_lan::PeerLink>,
     },
-    // the sidecar's control connection dropped (crash, or it exited)
-    TsnetSidecarDisconnected,
+    // the multiplayer sidecar exited (crash, or stopped)
+    TailcatExited,
 }
