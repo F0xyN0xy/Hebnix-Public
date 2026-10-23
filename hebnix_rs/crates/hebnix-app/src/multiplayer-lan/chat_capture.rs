@@ -1,8 +1,7 @@
 // Reads text chat out of Rocket League's LAN game traffic (UDP, RL_LAN_PORT).
 // LAN game packets are not encrypted, so this only watches: a WinDivert
-// handle in sniff mode, the same way beacon.rs captures the discovery
-// broadcast (needs Hebnix running as administrator). Packets are copied,
-// never diverted, sent or modified.
+// handle in sniff mode (raw_capture.rs, needs Hebnix running as
+// administrator). Packets are copied, never diverted, sent or modified.
 //
 // A chat message is a bit-packed (LSB first, not byte aligned) record that
 // appears identically in the client -> server RPC and the server -> clients
@@ -23,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::beacon::{
+use super::raw_capture::{
     RawCapture, WINDIVERT_FLAG_RECV_ONLY, WINDIVERT_FLAG_SNIFF, parse_udp_payload,
 };
 

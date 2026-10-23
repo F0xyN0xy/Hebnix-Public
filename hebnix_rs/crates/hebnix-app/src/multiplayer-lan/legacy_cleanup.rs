@@ -1,4 +1,7 @@
-//! removes a stale Tailscale NRPT (DNS policy) rule, if one is left behind.
+//! Cleans up what the old tailscaled-based Workshop multiplayer could leave
+//! behind: the `HebnixTailscale` Windows service and its extracted files
+//! (see remove_legacy_service), and a stale Tailscale NRPT (DNS policy) rule.
+//!
 //!
 //! tailscaled's Windows DNS manager writes a fixed, hardcoded registry key
 //! (the same one for any tailscaled build, ours or a real install) whenever
@@ -20,10 +23,17 @@
 //! setup (ours or the user's own Tailscale) is left alone.
 
 use std::net::{SocketAddr, TcpStream};
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::time::Duration;
 
 use winreg::RegKey;
 use winreg::enums::HKEY_LOCAL_MACHINE;
+
+const LEGACY_SERVICE: &str = "HebnixTailscale";
+/// files older versions extracted to `%AppData%\Hebnix\multiplayer-lan`
+const LEGACY_FILES: &[&str] = &["tailscaled.exe", "tailscale.exe", "wintun.dll"];
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const NRPT_RULE_ID: &str = "{5abe529b-675b-4486-8459-25a634dacc23}";
 const MAGIC_DNS_IP: &str = "100.100.100.100";
@@ -85,5 +95,51 @@ pub fn clean_stale_nrpt_rule(log: impl Fn(&str)) {
                 "[Core] Could not open the DNS policy registry key to remove the stale rule: {error}"
             ));
         }
+    }
+}
+
+/// Stops and deletes the `HebnixTailscale` service older versions installed
+/// (and deliberately left running between sessions), then deletes the
+/// tailscaled files they extracted. Needs administrator rights; without
+/// them this does nothing and is retried on a later elevated start.
+pub fn remove_legacy_service(base_dir: &std::path::Path, log: impl Fn(&str)) {
+    let installed = sc(&["query", LEGACY_SERVICE]).is_ok();
+    if installed {
+        let _ = sc(&["stop", LEGACY_SERVICE]);
+        // the service needs a moment to stop before it can be deleted
+        for _ in 0..50 {
+            match sc(&["query", LEGACY_SERVICE]) {
+                Ok(out) if out.contains("STOPPED") => break,
+                Err(_) => break,
+                _ => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        match sc(&["delete", LEGACY_SERVICE]) {
+            Ok(_) => log("[Core] Removed the old Workshop multiplayer network service (HebnixTailscale)."),
+            Err(error) => {
+                log(&format!(
+                    "[Core] Could not remove the old HebnixTailscale service: {error}"
+                ));
+                return;
+            }
+        }
+    }
+    let dir = base_dir.join("multiplayer-lan");
+    for file in LEGACY_FILES {
+        let _ = std::fs::remove_file(dir.join(file));
+    }
+}
+
+fn sc(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("sc.exe")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to run sc.exe: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(stdout.trim().to_string())
     }
 }

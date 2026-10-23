@@ -1,4 +1,4 @@
-// tells tailnet peers which workshop map is in which slot, so a guest can see
+// tells the other players which workshop map is in which slot, so a guest can see
 // that they're missing the host's map and offer to install it. maps from the
 // workshop cdn are described by id and can be downloaded from the cdn or, if
 // the cdn is slow or down, fetched from the peer. maps a player imported
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::TsnetSidecarHandle;
+use super::TailcatSidecarHandle;
 
 pub const MAP_SYNC_PORT: u16 = 14790;
 /// ids of maps a player imported themselves start with this, followed by the
@@ -302,13 +302,14 @@ fn clean_name(name: &str) -> String {
     clean_text(name, MAX_NAME_CHARS)
 }
 
-/// peers are only trusted if they sit in the same /24 as our own tailnet
-/// address (the tailnet is one shared subnet, see tsnet_sidecar.rs)
-fn peer_allowed(local: IpAddr, peer: IpAddr) -> bool {
-    match (local, peer) {
-        (IpAddr::V4(local), IpAddr::V4(peer)) => local.octets()[..3] == peer.octets()[..3],
-        _ => false,
-    }
+/// the map sync server only listens on loopback, where the sidecar delivers
+/// each other player's connection from its own 127.77.x.y address
+const SERVER_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+/// every peer is reached through the sidecar on loopback, so anything else
+/// (another machine on the real network) is never trusted
+fn peer_allowed(peer: IpAddr) -> bool {
+    peer.is_loopback()
 }
 
 pub struct MapSync {
@@ -321,12 +322,11 @@ pub struct MapSync {
 
 impl MapSync {
     pub fn start(
-        sidecar: Arc<TsnetSidecarHandle>,
-        bind_ip: IpAddr,
+        sidecar: Arc<TailcatSidecarHandle>,
         provider: MapProvider,
         files: MapFileProvider,
     ) -> Result<Self, String> {
-        let (sync, _) = Self::start_server(bind_ip, MAP_SYNC_PORT, provider, files)?;
+        let (sync, _) = Self::start_server(SERVER_IP, MAP_SYNC_PORT, provider, files)?;
         let stop = sync.stop.clone();
         let offers = sync.offers.clone();
         let blocked = sync.blocked.clone();
@@ -342,7 +342,7 @@ impl MapSync {
                         let Ok(ip) = peer.tailnet_ip.parse::<IpAddr>() else {
                             continue;
                         };
-                        if !peer_allowed(bind_ip, ip) || is_blocked(&blocked, ip) {
+                        if !peer_allowed(ip) || is_blocked(&blocked, ip) {
                             continue;
                         }
                         if let Ok(info) = fetch_peer_info(ip, MAP_SYNC_PORT) {
@@ -394,7 +394,7 @@ impl MapSync {
                         let ip = addr.ip();
                         // anything over a limit is just dropped here, before a
                         // thread is spent on it
-                        if !peer_allowed(bind_ip, ip)
+                        if !peer_allowed(ip)
                             || is_blocked(&server_blocked, ip)
                             || connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS
                             || !limits.try_open(ip)

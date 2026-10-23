@@ -931,3 +931,24 @@ toast-filter-all = All plugins
 toast-sent-at = Sent at { $time }
 toast-clear = Clear all
 toast-empty = Nothing here yet. Plugins show up here when they send a toast.
+
+## Workshop multiplayer over tailcat
+multiplayer-connect-intro = Connects you to everyone else on Workshop multiplayer. Host or join from Rocket League's own LAN match screen once it's up; Rocket League keeps working online the whole time, and Hebnix doesn't need to run as administrator.
+multiplayer-relay-only-hover = Sends all multiplayer traffic through relay servers instead of straight to other players, so they never see your real IP address. Matches will have higher ping.
+multiplayer-set-a-match-password = Everyone connected can see your LAN match, so set a match password in Rocket League if it's private.
+multiplayer-connected = Connected
+multiplayer-no-other-players-online = No other players are on right now.
+multiplayer-players-online = { $count ->
+    [one] 1 other player on
+   *[other] { $count } other players on
+}
+multiplayer-link = connected { $route }, { $ping } ms
+multiplayer-link-unreachable = can't reach them right now
+multiplayer-route-direct = direct
+multiplayer-route-relay = through a relay
+multiplayer-start-rocket-league-normally = Start Rocket League (or keep it open if it already is).
+multiplayer-rocket-league-still-uses-multihome = Rocket League was started with -multihome, which Workshop multiplayer no longer uses. Restart it without that launch option.
+multiplayer-could-not-start = Could not start Workshop multiplayer: { $error }
+multiplayer-helper-stopped = The multiplayer connection stopped. Connect again.
+multiplayer-starting-rocket-league = Starting Rocket League...
+multiplayer-rocket-league-is-starting = Rocket League is starting.

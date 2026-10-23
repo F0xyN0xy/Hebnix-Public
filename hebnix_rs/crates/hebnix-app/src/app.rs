@@ -651,20 +651,28 @@ impl HebnixApp {
             })
             .ok();
 
-        // one-shot check for a stale Tailscale DNS policy rule left behind by
-        // a crashed/force-killed multiplayer session (see dns_cleanup.rs) --
-        // registry + a short socket probe, so it goes on its own thread
-        // rather than blocking startup.
+        // one-shot cleanup of what the old tailscaled-based multiplayer could
+        // leave behind: a stale Tailscale DNS policy rule and the
+        // HebnixTailscale service (see legacy_cleanup.rs). Registry, a short
+        // socket probe and sc.exe, so it goes on its own thread rather than
+        // blocking startup.
         {
             let tx = tx.clone();
             let ctx = cc.egui_ctx.clone();
             std::thread::Builder::new()
                 .name("dns-policy-check".into())
                 .spawn(move || {
-                    crate::multiplayer_lan::clean_stale_nrpt_rule(|msg| {
+                    let log = |msg: &str| {
                         let _ = tx.send(AppMsg::Log(msg.to_string()));
                         ctx.request_repaint();
-                    });
+                    };
+                    crate::multiplayer_lan::clean_stale_nrpt_rule(log);
+                    if crate::spoofer::is_admin() {
+                        crate::multiplayer_lan::remove_legacy_service(
+                            &crate::config::base_dir(),
+                            log,
+                        );
+                    }
                 })
                 .ok();
         }
@@ -2561,7 +2569,13 @@ impl HebnixApp {
                     self.workshop.set_multiplayer_progress(status);
                 }
                 AppMsg::WorkshopTailnetStarted { result } => {
-                    self.workshop.finish_tailnet_started(result);
+                    if let Err(error) = &result {
+                        self.console.write(format!(
+                            "[Multiplayer] Could not start: {}",
+                            crate::multiplayer_lan::redact(error)
+                        ));
+                    }
+                    self.workshop.finish_tailnet_started(result, &self.tx, ctx);
                 }
                 AppMsg::WorkshopMultiplayerLaunched { result } => {
                     self.workshop.finish_multiplayer_launch(result);
@@ -2715,57 +2729,16 @@ impl HebnixApp {
                     self.plugin_mgr.on_ws_close(&slug, &id, &reason);
                     ctx.request_repaint();
                 }
-                AppMsg::TsnetUpResult { result } => {
-                    if self.workshop.multiplayer_connection_requested() {
-                        match result {
-                            Ok(ip) => {
-                                self.console
-                                    .write("[Multiplayer] Connected to the Hebnix Network");
-                                self.workshop.set_tailnet_ip(ip);
-                                self.workshop.refresh_launch_status(&self.tx, ctx);
-                            }
-                            Err(error) => {
-                                self.console.write(format!(
-                                    "[Multiplayer] Could not connect: {}",
-                                    crate::multiplayer_lan::redact(&error)
-                                ));
-                                self.workshop.tailnet_failed(error);
-                            }
-                        }
-                    }
-                }
-                // not otherwise consumed yet -- peer-level status/events only
-                // drive the console for now. See the tsnet-multiplayer rework
-                // plan's beacon-relay/firewall-scoping notes for what would
-                // consume a live peer list if this UI panel grows one later.
-                AppMsg::TsnetStatus {
-                    state,
-                    tailnet_ip: _,
-                    peers,
-                } => {
-                    self.console.write(format!(
-                        "[Multiplayer] Network status: {state:?}; peers={}",
-                        peers.len()
-                    ));
-                }
-                AppMsg::TsnetPeerEvent {
-                    online,
-                    tailnet_ip: _,
-                } => {
-                    let word = if online { "online" } else { "offline" };
-                    self.console.write(format!("[Multiplayer] Peer {word}"));
-                }
-                AppMsg::TsnetDownResult { ok } => {
-                    if ok {
-                        self.console
-                            .write("[Multiplayer] Disconnected from the Hebnix Network");
-                    } else {
-                        self.console.write("[Multiplayer] Disconnect failed");
-                    }
-                }
-                AppMsg::TsnetSidecarDisconnected => {
+                AppMsg::TailcatPeer { name, online } => {
+                    let word = if online { "is on" } else { "left" };
                     self.console
-                        .write("[tsnet] lost connection to the multiplayer helper".to_string());
+                        .write(format!("[Multiplayer] {} {word}", crate::multiplayer_lan::redact(&name)));
+                }
+                AppMsg::TailcatStatus { peers } => {
+                    self.workshop.multiplayer_players(peers);
+                }
+                AppMsg::TailcatExited => {
+                    self.workshop.multiplayer_sidecar_exited(&self.tx);
                 }
             }
         }
