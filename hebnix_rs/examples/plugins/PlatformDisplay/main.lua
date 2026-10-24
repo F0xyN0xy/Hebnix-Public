@@ -467,7 +467,7 @@ function plugin.on_settings(ui)
     ui.heading("Icons")
     ui.combo_box("platform_display_style", "Style", STYLES)
     if pfp_overlay_loaded() then
-        ui.label("Square while PfpOverlayV2 is loaded.")
+        ui.label("Square while Rocket Profiles is loaded.")
     end
     ui.checkbox("platform_display_show_ghosts", "Show players who left, dimmed", true)
     ui.checkbox("platform_display_hide_steam", "Hide the Steam icon", false)
