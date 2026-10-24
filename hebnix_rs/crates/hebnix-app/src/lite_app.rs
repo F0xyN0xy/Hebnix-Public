@@ -573,9 +573,7 @@ impl LiteApp {
                 }
                 AppMsg::TrayQuit => {
                     tracing::info!("handling tray quit on UI thread");
-                    if self.update_info.is_none() {
-                        self.force_quit();
-                    }
+                    self.force_quit();
                 }
                 AppMsg::HotkeyCaptured(value) => {
                     self.capturing_hotkey = false;
@@ -706,6 +704,10 @@ impl LiteApp {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
                         self.update_info = Some(info);
+                        // show the update once; after that it can be hidden or closed
+                        if self.hidden {
+                            self.set_hidden(ctx, false);
+                        }
                     }
                 }
                 AppMsg::ChangelogFetched { result } => {
@@ -3025,21 +3027,14 @@ impl eframe::App for LiteApp {
             self.last_size = (rect.width().max(0.0) as u32, rect.height().max(0.0) as u32);
         }
         if ctx.input(|input| input.viewport().close_requested()) && !self.quitting {
-            if self.update_info.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            } else {
-                if self.last_size.0 > 0 && self.last_size.1 > 0 {
-                    self.config.window.width = self.last_size.0;
-                    self.config.window.height = self.last_size.1;
-                    self.save_config();
-                }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.last_size.0 > 0 && self.last_size.1 > 0 {
+                self.config.window.width = self.last_size.0;
+                self.config.window.height = self.last_size.1;
+                self.save_config();
             }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.update_info.is_some() {
-            if self.hidden {
-                self.set_hidden(&ctx, false);
-            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.disable();
                 ui.centered_and_justified(|ui| {
