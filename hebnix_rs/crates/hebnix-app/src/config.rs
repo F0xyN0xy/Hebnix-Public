@@ -96,7 +96,7 @@ impl Default for SettingsCfg {
             discord_show_gamemode: true,
             discord_custom_message: "Playing Rocket League".to_string(),
             p2p_file_sharing: true,
-            overlay_refresh_fps: 60,
+            overlay_refresh_fps: 30,
         }
     }
 }
