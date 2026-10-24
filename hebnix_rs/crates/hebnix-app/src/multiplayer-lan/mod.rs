@@ -7,21 +7,17 @@
 //! traffic over loopback, so RL runs without `-multihome` (online play keeps
 //! working) and nothing needs administrator rights, a network adapter or a
 //! Windows service. Map sync (map_sync.rs) runs over the same connections.
-//! Only the LAN chat capture still needs administrator rights (WinDivert).
 
-mod chat_capture;
 mod firewall;
 mod hosting;
 mod legacy_cleanup;
 mod map_sync;
 mod models;
-mod raw_capture;
 mod room_api;
 mod tailcat_sidecar;
 
 use std::time::Duration;
 
-pub use chat_capture::{ChatCapture, ChatMessage};
 pub use firewall::ensure_sidecar_rule;
 // one session type, see hosting.rs
 pub use hosting::HostSession;
@@ -64,10 +60,6 @@ pub fn directory_key() -> Result<&'static str, String> {
         Ok(key)
     }
 }
-
-/// Rocket League's LAN game port. Another player's sidecar alias proxies
-/// alias:RL_LAN_PORT to theirs, and chat_capture.rs watches it.
-pub const RL_LAN_PORT: u16 = 7777;
 
 /// how long a session stays alive after Rocket League exits before Hebnix
 /// tears it down for real -- covers an ordinary crash/restart.

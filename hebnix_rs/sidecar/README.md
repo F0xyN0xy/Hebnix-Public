@@ -7,8 +7,7 @@ driver and no administrator rights.
 
 - `hebnix-tc/`: the sidecar's source. The built `hebnix-tc.exe` is checked in
   at `crates/hebnix-app/assets/multiplayer/` and embedded in Hebnix, which
-  extracts it to `%AppData%\Hebnix\multiplayer-lan` on start (same as
-  WinDivert, which the LAN chat capture still uses).
+  extracts it to `%AppData%\Hebnix\multiplayer-lan` on start.
 - `directory/`: the small web service every sidecar announces itself to so
   players find each other (no join codes). It runs on the multiplayer server;
   see its README.

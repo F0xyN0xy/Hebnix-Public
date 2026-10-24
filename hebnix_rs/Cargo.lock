@@ -2475,7 +2475,6 @@ dependencies = [
  "httparse",
  "image",
  "jpeg-decoder",
- "libloading 0.8.9",
  "mlua",
  "open",
  "p256",
