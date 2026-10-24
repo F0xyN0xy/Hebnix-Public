@@ -665,6 +665,7 @@ impl HebnixApp {
                         ctx.request_repaint();
                     };
                     crate::multiplayer_lan::clean_stale_nrpt_rule(log);
+                    crate::multiplayer_lan::remove_windivert_files(&crate::config::base_dir());
                     if crate::spoofer::is_admin() {
                         crate::multiplayer_lan::remove_legacy_service(
                             &crate::config::base_dir(),

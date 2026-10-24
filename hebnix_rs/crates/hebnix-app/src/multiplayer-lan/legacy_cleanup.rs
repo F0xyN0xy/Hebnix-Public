@@ -1,6 +1,8 @@
 //! Cleans up what the old tailscaled-based Workshop multiplayer could leave
 //! behind: the `HebnixTailscale` Windows service and its extracted files
 //! (see remove_legacy_service), and a stale Tailscale NRPT (DNS policy) rule.
+//! Also deletes the WinDivert files the old LAN chat capture extracted
+//! (see remove_windivert_files).
 //!
 //!
 //! tailscaled's Windows DNS manager writes a fixed, hardcoded registry key
@@ -33,6 +35,8 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 const LEGACY_SERVICE: &str = "HebnixTailscale";
 /// files older versions extracted to `%AppData%\Hebnix\multiplayer-lan`
 const LEGACY_FILES: &[&str] = &["tailscaled.exe", "tailscale.exe", "wintun.dll"];
+/// files the removed LAN chat capture extracted to the same folder
+const WINDIVERT_FILES: &[&str] = &["WinDivert.dll", "WinDivert64.sys"];
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const NRPT_RULE_ID: &str = "{5abe529b-675b-4486-8459-25a634dacc23}";
@@ -126,6 +130,16 @@ pub fn remove_legacy_service(base_dir: &std::path::Path, log: impl Fn(&str)) {
     }
     let dir = base_dir.join("multiplayer-lan");
     for file in LEGACY_FILES {
+        let _ = std::fs::remove_file(dir.join(file));
+    }
+}
+
+/// Deletes the WinDivert files older versions extracted for the LAN chat
+/// capture. They live in AppData, so this needs no administrator rights. If
+/// the driver is still loaded the .sys stays locked; a later start retries.
+pub fn remove_windivert_files(base_dir: &std::path::Path) {
+    let dir = base_dir.join("multiplayer-lan");
+    for file in WINDIVERT_FILES {
         let _ = std::fs::remove_file(dir.join(file));
     }
 }
