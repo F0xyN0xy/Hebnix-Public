@@ -703,10 +703,16 @@ impl LiteApp {
                     if let Ok(Some(info)) = result {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
-                        self.update_info = Some(info);
-                        // show the update once; after that it can be hidden or closed
-                        if self.hidden {
-                            self.set_hidden(ctx, false);
+                        if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
+                            self.console.write(
+                                "[Core] skip_update_lock is set in portable.txt, not locking for the update.",
+                            );
+                        } else {
+                            self.update_info = Some(info);
+                            // show the update once; after that it can be hidden or closed
+                            if self.hidden {
+                                self.set_hidden(ctx, false);
+                            }
                         }
                     }
                 }

@@ -36,3 +36,27 @@ fn portable_base_dir() -> Option<PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     dir.join("portable.txt").exists().then_some(dir)
 }
+
+/// true if portable.txt next to the exe has a line `name` or `name=true`
+/// (case-insensitive). Other lines are ignored, so the file can keep its note.
+pub fn portable_option(name: &str) -> bool {
+    let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("portable.txt")))
+    else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    contents.lines().any(|line| {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        match line.split_once('=') {
+            Some((key, value)) => {
+                key.trim().eq_ignore_ascii_case(name)
+                    && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+            }
+            None => line.eq_ignore_ascii_case(name),
+        }
+    })
+}
