@@ -7,7 +7,7 @@ settings-language-auto = Automatisch (System)
 
 tab-console = Konsole
 tab-workshop = Maps
-tab-spoofer = Spoofer
+tab-spoofer = Anpassung
 tab-patcher = Items
 tab-colours = Farben
 tab-settings = Einstellungen

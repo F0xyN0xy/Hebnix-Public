@@ -1,0 +1,97 @@
+{
+  "cars": {
+    "UNIVERSAL": {
+      "skins": [
+        {
+          "id": "4659",
+          "name": "Season 12 - Bronze",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail": "skin_seasontwelve_T_SF.upk",
+          "quality": "Limited",
+          "universal": true,
+          "scope": "UNIVERSAL",
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_seasontwelve"
+        },
+        {
+          "id": "4660",
+          "internal_name": "skin_skin_seasontwelve06",
+          "name": "Season 12 - Champion",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_skin_seasontwelve06",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        },
+        {
+          "id": "4681",
+          "internal_name": "skin_seasontwelve02",
+          "name": "Season 12 - Silver",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_seasontwelve02",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        },
+        {
+          "id": "4682",
+          "internal_name": "skin_seasontwelve03",
+          "name": "Season 12 - Gold",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_seasontwelve03",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        },
+        {
+          "id": "4683",
+          "internal_name": "skin_seasontwelve04",
+          "name": "Season 12 - Platinum",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_seasontwelve04",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        },
+        {
+          "id": "4684",
+          "internal_name": "skin_seasontwelve05",
+          "name": "Season 12 - Diamond",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_seasontwelve05",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        },
+        {
+          "id": "4685",
+          "internal_name": "skin_skin_seasontwelve07",
+          "name": "Season 12 - Grand Champion",
+          "quality": "Limited",
+          "quality_id": 8,
+          "paintable": false,
+          "package": "skin_seasontwelve",
+          "path": "skin_seasontwelve.skin_skin_seasontwelve07",
+          "upk_path": "skin_seasontwelve_SF.upk",
+          "thumbnail_package": "skin_SeasonTwelve_T",
+          "thumbnail": "skin_SeasonTwelve_T_SF.upk"
+        }
+      ]
+    }
+  }
+}

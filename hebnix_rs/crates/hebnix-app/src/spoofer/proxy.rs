@@ -4,21 +4,20 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
+use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use crate::messages::AppMsg;
 use crate::spoofer::ca::Ca;
 use crate::spoofer::rules::{Body, Rule};
 
-pub fn serve_one(
-    mut tls: StreamOwned<ServerConnection, TcpStream>,
+pub fn serve_one<S: Read + Write>(
+    mut tls: S,
     upstream: &ureq::Agent,
     rules: &Arc<Vec<Box<dyn Rule>>>,
     tx: &Sender<AppMsg>,
@@ -35,7 +34,12 @@ pub fn serve_one(
     } else {
         host
     };
-    let url = format!("https://{upstream_host}{path_and_query}");
+    let scheme = if req.path.starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    };
+    let url = format!("{scheme}://{upstream_host}{path_and_query}");
     let mut call = upstream.request(&req.method, &url);
     for (name, value) in &req.headers {
         let low = name.to_ascii_lowercase();

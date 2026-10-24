@@ -871,6 +871,7 @@ pub struct WorkshopState {
     pub catalog_status: String,
     pub fetched: bool,
     pub confirm_delete: Option<Value>,
+    theme_selected_map: Option<String>,
     view: WorkshopView,
     background_changer: BackgroundChangerState,
     menu_map: MenuMapState,
@@ -911,6 +912,7 @@ impl WorkshopState {
             catalog_status: t("catalog-loading-catalog").to_string(),
             fetched: false,
             confirm_delete: None,
+            theme_selected_map: None,
             view: WorkshopView::Browse,
             background_changer: BackgroundChangerState::default(),
             menu_map: MenuMapState::default(),
@@ -1043,6 +1045,10 @@ impl WorkshopState {
         self.rl_launch = rl_launch.clone();
         let ctx = ui.ctx().clone();
 
+        if crate::theme::presentation(&ctx).is_some() {
+            ui.heading(t("tab-workshop"));
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.view,
@@ -1105,19 +1111,11 @@ impl WorkshopState {
             return;
         }
 
-        // Toolbar
-        ui.horizontal(|ui| {
-            ui.strong(t("spoofer-search"));
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text(t("ball-name-or-author"))
-                    .desired_width(200.0),
-            );
-            let submitted =
-                search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(t("ball-search")).clicked() || submitted {
-                self.execute_search(true);
-            }
+        // The shared browser controls leave the map card renderers intact.
+        if crate::ui::browser::search(ui, &mut self.search, t("ball-name-or-author")) {
+            self.execute_search(true);
+        }
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .checkbox(&mut self.view_downloaded, t("render-view-downloaded"))
                 .changed()
@@ -1172,35 +1170,11 @@ impl WorkshopState {
                 }
             }
         });
-
         ui.add_space(4.0);
-
-        // Pager row
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(self.page > 0, egui::Button::new(t("render-prev")))
-                .clicked()
-            {
-                self.page -= 1;
-            }
-            let label = if self.valid.is_empty() {
-                self.catalog_status.clone()
-            } else {
-                format!("Page {} of {}", self.page + 1, self.total_pages())
-            };
-            ui.add_sized([ui.available_width() - 90.0, 20.0], egui::Label::new(label));
-            if ui
-                .add_enabled(
-                    self.page + 1 < self.total_pages(),
-                    egui::Button::new(t("render-next")),
-                )
-                .clicked()
-            {
-                self.page += 1;
-            }
-        });
-
-        ui.add_space(4.0);
+        let presentation = crate::theme::presentation(&ctx);
+        let column_count = self.browse_columns(ui, presentation.as_deref());
+        self.page_size = column_count * crate::ui::browser::ROWS;
+        crate::ui::browser::pagination(ui, &mut self.page, self.valid.len(), self.page_size);
 
         // Card grid
         let start = self.page * self.page_size;
@@ -1220,38 +1194,42 @@ impl WorkshopState {
 
         let mut action: Option<(usize, CardAction)> = None;
 
-        egui::ScrollArea::vertical()
-            .id_salt("workshop_grid")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let grid_width = ui.available_width();
-                ui.set_width(grid_width);
-                for row in indices.chunks(4) {
-                    ui.columns(4, |cols| {
-                        for (col_idx, &map_idx) in row.iter().enumerate() {
-                            let col = &mut cols[col_idx];
-                            // A card must use its column's width. Otherwise a long
-                            // button can grow this row, shifting later rows right.
-                            let card_width = col.available_width();
-                            col.set_width(card_width);
-                            if let Some(act) = self.render_card(col, map_idx) {
-                                action = Some((map_idx, act));
+        if let Some(p) = crate::theme::presentation(&ctx) {
+            action = self.render_themed_library(ui, &indices, &p);
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("workshop_grid")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let grid_width = ui.available_width();
+                    ui.set_width(grid_width);
+                    for row in indices.chunks(column_count) {
+                        ui.columns(column_count, |cols| {
+                            for (col_idx, &map_idx) in row.iter().enumerate() {
+                                let col = &mut cols[col_idx];
+                                // A card must use its column's width. Otherwise a long
+                                // button can grow this row, shifting later rows right.
+                                let card_width = col.available_width();
+                                col.set_width(card_width);
+                                if let Some(act) = self.render_card(col, map_idx) {
+                                    action = Some((map_idx, act));
+                                }
                             }
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
-                if indices.is_empty() {
-                    ui.add_space(30.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(if self.catalog.is_empty() {
-                            self.catalog_status.clone()
-                        } else {
-                            t("handle-messages-no-maps-found").to_string()
                         });
-                    });
-                }
-            });
+                        ui.add_space(6.0);
+                    }
+                    if indices.is_empty() {
+                        ui.add_space(30.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(if self.catalog.is_empty() {
+                                self.catalog_status.clone()
+                            } else {
+                                t("handle-messages-no-maps-found").to_string()
+                            });
+                        });
+                    }
+                });
+        }
 
         if let Some((map_idx, act)) = action {
             self.handle_action(map_idx, act, rl_path, tx, &ctx);
@@ -2244,33 +2222,40 @@ impl WorkshopState {
                 );
 
                 if !active_targets.is_empty() {
-                    ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
-                        let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(68, 190, 100));
-                        let origin = rect.left_top();
-                        ui.painter().line_segment(
-                            [
-                                origin + egui::vec2(1.0, 7.0),
-                                origin + egui::vec2(5.0, 11.0),
-                            ],
-                            stroke,
-                        );
-                        ui.painter().line_segment(
-                            [
-                                origin + egui::vec2(5.0, 11.0),
-                                origin + egui::vec2(12.0, 2.0),
-                            ],
-                            stroke,
-                        );
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Active on: {}",
-                                active_targets.join(", ")
-                            ))
-                            .size(12.0),
-                        );
-                    });
+                    let active_text = format!("Active on: {}", active_targets.join(", "));
+                    let mut font = egui::TextStyle::Body.resolve(ui.style());
+                    font.size = 12.0;
+                    let text_width = ui.painter()
+                        .layout_no_wrap(active_text.clone(), font, ui.visuals().text_color())
+                        .size().x;
+                    let row_width = (13.0 + ui.spacing().item_spacing.x + text_width)
+                        .min(ui.available_width());
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(row_width, ui.spacing().interact_size.y),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(13.0, 13.0), egui::Sense::hover(),
+                            );
+                            let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(68, 190, 100));
+                            let origin = rect.left_top();
+                            ui.painter().line_segment(
+                                [
+                                    origin + egui::vec2(1.0, 7.0),
+                                    origin + egui::vec2(5.0, 11.0),
+                                ],
+                                stroke,
+                            );
+                            ui.painter().line_segment(
+                                [
+                                    origin + egui::vec2(5.0, 11.0),
+                                    origin + egui::vec2(12.0, 2.0),
+                                ],
+                                stroke,
+                            );
+                            ui.label(egui::RichText::new(active_text).size(12.0));
+                        },
+                    );
                 } else {
                     let status = if is_local_entry(map_data) {
                         "📁 Imported".to_string()
@@ -2461,4 +2446,646 @@ enum CardAction {
     InstallOrDownload,
     Unload,
     DeleteCache,
+}
+
+// Every tile reserves the same slots, including the optional cache action.
+struct ThemedTileMetrics {
+    size: egui::Vec2,
+    padding: f32,
+    image_size: egui::Vec2,
+    title_height: f32,
+    small_height: f32,
+    action_height: f32,
+    delete_height: f32,
+    footer_height: f32,
+}
+impl ThemedTileMetrics {
+    fn new(ui: &egui::Ui, card: &crate::theme::MapCardStyle, width: f32, target: &str, details: bool) -> Self {
+        let gap = ui.spacing().item_spacing.y;
+        // Reserve the selected border even on unselected cards.
+        let padding = card.padding + 2.0;
+        let inner_width = (width - padding * 2.0).max(1.0);
+        let image_width = if card.horizontal { 100.0_f32.min(inner_width * 0.4) } else { inner_width };
+        let body_width = if card.horizontal { (inner_width - image_width - ui.spacing().item_spacing.x).max(1.0) } else { inner_width };
+        let image_height = if card.horizontal { card.image_height.min(140.0) } else { card.image_height };
+        let title_height = (ui.text_style_height(&egui::TextStyle::Button) + ui.spacing().button_padding.y * 2.0 + 2.0)
+            .max(ui.spacing().interact_size.y);
+        let small_height = ui.text_style_height(&egui::TextStyle::Small);
+        let button_font = egui::TextStyle::Button.resolve(ui.style());
+        let text_width = (body_width - ui.spacing().button_padding.x * 2.0 - 2.0).max(1.0);
+        let labels = if details { vec!["Details".to_owned()] } else {
+            vec![t("tab-working"), format!("Unload {target}"), format!("Load to {target}"), format!("Download for {target}")]
+        };
+        let text_height = labels.into_iter().map(|label|ui.fonts_mut(|fonts|
+            fonts.layout(label,button_font.clone(),egui::Color32::WHITE,text_width).size().y
+        )).fold(0.0_f32,f32::max);
+        let action_height = 28.0_f32.max(ui.spacing().interact_size.y)
+            .max(text_height + ui.spacing().button_padding.y * 2.0 + 2.0);
+        let delete_height = (small_height + ui.spacing().button_padding.y * 2.0 + 2.0).max(ui.spacing().interact_size.y);
+        let footer_height = if details { action_height } else { small_height + gap + action_height + gap + delete_height };
+        let body_height = title_height + gap + small_height + gap + footer_height;
+        let min_height = if card.horizontal { image_height.max(body_height) } else { image_height + gap + body_height };
+        Self { size: egui::vec2(width,card.height.max(min_height + padding * 2.0)), padding,
+            image_size: egui::vec2(image_width,image_height), title_height, small_height,
+            action_height, delete_height, footer_height }
+    }
+}
+fn centered_image_uv(source: egui::Vec2, viewport: egui::Vec2) -> egui::Rect {
+    let source_ratio = source.x / source.y.max(1.0);
+    let view_ratio = viewport.x / viewport.y.max(1.0);
+    let fraction = if source_ratio > view_ratio { egui::vec2(view_ratio/source_ratio,1.0) }
+        else { egui::vec2(1.0,source_ratio/view_ratio) };
+    egui::Rect::from_center_size(egui::pos2(0.5,0.5),fraction)
+}
+
+impl WorkshopState {
+    fn browse_columns(
+        &self,
+        ui: &egui::Ui,
+        presentation: Option<&crate::theme::Presentation>,
+    ) -> usize {
+        let mut width = ui.available_width() - ui.spacing().scroll.allocated_width();
+        let minimum = if let Some(p) = presentation {
+            if p.pages.workshop.layout == crate::theme::WorkshopPresentation::LibraryWithDetails
+                && ui.available_width() >= 880.0
+            {
+                width -= p
+                    .pages
+                    .workshop
+                    .details_width
+                    .min(ui.available_width() * 0.36);
+            }
+            p.components.map_card.min_width.max(224.0)
+        } else {
+            224.0
+        };
+        crate::ui::browser::columns_for_width(width, ui.spacing().item_spacing.x, minimum)
+    }
+
+    fn themed_image(&self, ui: &mut egui::Ui, map_idx: usize, size: egui::Vec2) -> egui::Response {
+        let banner = str_of(&self.catalog[map_idx], "banner_path", "");
+        let (rect,response) = ui.allocate_exact_size(size,egui::Sense::click());
+        ui.painter().rect_filled(rect,4,ui.visuals().extreme_bg_color);
+        match self.images.get(banner) {
+            Some(ImageState::Ready(bytes)) => {
+                let image = egui::Image::from_bytes(format!("bytes://workshop/{banner}"),bytes.clone()).corner_radius(4);
+                let uv = image.load_for_size(ui.ctx(),size).ok().and_then(|poll|poll.size())
+                    .map(|source|centered_image_uv(source,size))
+                    .unwrap_or(egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)));
+                image.uv(uv).paint_at(ui,rect);
+            }
+            _ => { ui.painter().with_clip_rect(ui.clip_rect().intersect(rect)).text(rect.center(),egui::Align2::CENTER_CENTER,
+                t("card-no-image-available"),egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color()); }
+        }
+        response
+    }
+    fn render_themed_library(
+        &mut self,
+        ui: &mut egui::Ui,
+        indices: &[usize],
+        p: &crate::theme::Presentation,
+    ) -> Option<(usize, CardAction)> {
+        use crate::theme::{WorkshopPresentation, color, surface_color};
+        if indices.is_empty() {
+            ui.label(if self.catalog.is_empty() {
+                self.catalog_status.clone()
+            } else {
+                t("handle-messages-no-maps-found")
+            });
+            return None;
+        }
+        let selected = indices
+            .iter()
+            .copied()
+            .find(|&i| self.theme_selected_map.as_deref() == Some(&id_of(&self.catalog[i])))
+            .unwrap_or(indices[0]);
+        self.theme_selected_map = Some(id_of(&self.catalog[selected]));
+        let with_details = p.pages.workshop.layout == WorkshopPresentation::LibraryWithDetails
+            && ui.available_width() >= 880.0;
+        let column_count = self.browse_columns(ui, Some(p));
+        let mut action = None;
+        if with_details {
+            let width = p
+                .pages
+                .workshop
+                .details_width
+                .min(ui.available_width() * 0.36);
+            egui::Panel::right("workshop_theme_details")
+                .resizable(false)
+                .exact_size(width)
+                .frame(
+                    egui::Frame::new()
+                        .fill(surface_color(ui, &p.components.map_card.surface))
+                        .inner_margin(12),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("workshop_theme_details_scroll")
+                        .show(ui, |ui| {
+                            self.themed_image(
+                                ui,
+                                selected,
+                                egui::vec2(
+                                    ui.available_width(),
+                                    p.components.map_card.image_height * 1.5,
+                                ),
+                            );
+                            ui.heading(str_of(&self.catalog[selected], "name", "Unknown"));
+                            ui.label(
+                                egui::RichText::new(str_of(
+                                    &self.catalog[selected],
+                                    "author",
+                                    "Unknown",
+                                ))
+                                .weak(),
+                            );
+                            ui.separator();
+                            ui.label(str_of(&self.catalog[selected], "short_description", ""));
+                            ui.add_space(12.0);
+                            ui.label(format!("{}: {}", t("render-map-to-replace"), self.target));
+                            if let Some(a) = self.themed_map_actions(ui, selected, None) {
+                                action = Some((selected, a));
+                            }
+                        });
+                });
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("workshop_grid")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let card = &p.components.map_card;
+                        let columns = column_count;
+                        let width = ((ui.available_width()
+                            - ui.spacing().item_spacing.x * (columns - 1) as f32)
+                            / columns as f32)
+                            .max(1.0);
+                        let metrics =
+                            ThemedTileMetrics::new(ui, card, width, &self.target, with_details);
+                        for row in indices.chunks(columns) {
+                            ui.columns(columns, |cols| {
+                                for (col, &idx) in cols.iter_mut().zip(row) {
+                                    let id = id_of(&self.catalog[idx]);
+                                    let is_selected =
+                                        self.theme_selected_map.as_deref() == Some(&id);
+                                    let (rect, _) =
+                                        col.allocate_exact_size(metrics.size, egui::Sense::hover());
+                                    col.painter().rect_filled(
+                                        rect,
+                                        card.corner_radius,
+                                        surface_color(col, &card.surface),
+                                    );
+                                    col.painter().rect_stroke(
+                                        rect,
+                                        card.corner_radius,
+                                        egui::Stroke::new(
+                                            if is_selected { 2.0 } else { 1.0 },
+                                            color(if is_selected {
+                                                &card.selected_border
+                                            } else {
+                                                &card.border
+                                            }),
+                                        ),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    let inner = rect.shrink(metrics.padding);
+                                    let mut tile = col.new_child(
+                                        egui::UiBuilder::new()
+                                            .id_salt(("map_tile", id.clone()))
+                                            .max_rect(inner)
+                                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    );
+                                    tile.set_clip_rect(tile.clip_rect().intersect(inner));
+                                    let image_rect =
+                                        egui::Rect::from_min_size(inner.min, metrics.image_size);
+                                    let mut image_ui = tile.new_child(
+                                        egui::UiBuilder::new()
+                                            .id_salt("image")
+                                            .max_rect(image_rect),
+                                    );
+                                    if self
+                                        .themed_image(&mut image_ui, idx, metrics.image_size)
+                                        .clicked()
+                                    {
+                                        self.theme_selected_map = Some(id.clone());
+                                    }
+                                    let body_min = if card.horizontal {
+                                        inner.min
+                                            + egui::vec2(
+                                                metrics.image_size.x
+                                                    + tile.spacing().item_spacing.x,
+                                                0.0,
+                                            )
+                                    } else {
+                                        inner.min
+                                            + egui::vec2(
+                                                0.0,
+                                                metrics.image_size.y
+                                                    + tile.spacing().item_spacing.y,
+                                            )
+                                    };
+                                    let mut body = tile.new_child(
+                                        egui::UiBuilder::new()
+                                            .id_salt("body")
+                                            .max_rect(egui::Rect::from_min_max(body_min, inner.max))
+                                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                                    );
+                                    if let Some(a) = self.themed_card_body(
+                                        &mut body,
+                                        idx,
+                                        with_details,
+                                        &metrics,
+                                    ) {
+                                        action = Some((idx, a));
+                                    }
+                                }
+                            });
+                            ui.add_space(8.0);
+                        }
+                    });
+            });
+        action
+    }
+    fn themed_card_body(&mut self, ui: &mut egui::Ui, idx: usize, with_details: bool, metrics: &ThemedTileMetrics) -> Option<CardAction> {
+        let name = str_of(&self.catalog[idx],"name","Unknown").to_string();
+        let width = ui.available_width();
+        if ui.add_sized([width,metrics.title_height],egui::Button::new(egui::RichText::new(&name).strong())
+            .frame(false).truncate()).on_hover_text(&name).clicked() {
+            self.theme_selected_map = Some(id_of(&self.catalog[idx]));
+        }
+        let author = str_of(&self.catalog[idx],"author","Unknown");
+        ui.add_sized([width,metrics.small_height],egui::Label::new(egui::RichText::new(author).small().weak()).truncate())
+            .on_hover_text(author);
+        let rect = egui::Rect::from_min_max(egui::pos2(ui.max_rect().left(),ui.max_rect().bottom()-metrics.footer_height),ui.max_rect().max);
+        let mut footer = ui.new_child(egui::UiBuilder::new().id_salt("actions").max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)));
+        if !with_details { self.themed_map_actions(&mut footer,idx,Some(metrics)) } else {
+            if footer.add_sized([width,metrics.action_height],egui::Button::new("Details")).clicked() {
+                self.theme_selected_map = Some(id_of(&self.catalog[idx]));
+            }
+            None
+        }
+    }
+    fn themed_map_actions(&mut self, ui: &mut egui::Ui, idx: usize, metrics: Option<&ThemedTileMetrics>) -> Option<CardAction> {
+        let id = id_of(&self.catalog[idx]);
+        let active = self.manager.get_active_targets_for_map(&id).contains(&self.target);
+        let cached = self.manager.is_cached(&id);
+        let busy = self.busy.contains(&id);
+        let label = if busy { t("tab-working") } else if active { format!("Unload {}",self.target) }
+            else if cached { format!("Load to {}",self.target) } else { format!("Download for {}",self.target) };
+        let mut result = None;
+        let status = if active {"Active"} else if cached {"Downloaded"} else {"Not downloaded"};
+        if let Some(m) = metrics {
+            ui.add_sized([ui.available_width(), m.small_height],
+                egui::Label::new(egui::RichText::new(status).small().weak()).truncate())
+                .on_hover_text(status);
+        } else {
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+        let button = egui::Button::new(&label).wrap().min_size(egui::vec2(0.0,28.0));
+        let response = if let Some(m) = metrics { ui.add_enabled_ui(!busy,|ui| ui.add_sized([ui.available_width(),m.action_height],button)).inner }
+            else { ui.add_enabled(!busy,button) };
+        if response.on_hover_text(&label).clicked() {
+            result = Some(if active {CardAction::Unload} else {CardAction::InstallOrDownload});
+        }
+        if cached && !active && !busy {
+            let clicked = if let Some(m)=metrics { ui.add_sized([ui.available_width(),m.delete_height],egui::Button::new(egui::RichText::new("Delete cached map").small()).truncate()).clicked() }
+                else { ui.small_button("Delete cached map").clicked() };
+            if clicked { result = Some(CardAction::DeleteCache); }
+        } else if let Some(m)=metrics { ui.allocate_space(egui::vec2(ui.available_width(),m.delete_height)); }
+        result
+    }
+}
+
+#[cfg(test)]
+mod theme_layout_tests {
+    use super::*;
+    #[test]
+    fn maps_browser_keeps_map_tiles_and_pages_in_three_rows() {
+        let base =
+            std::env::temp_dir().join(format!("hebnix-maps-browser-{}", rand::random::<u64>()));
+        let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
+        for theme in ["Dark", "Ocean Studio Dark"] {
+            for width in [760.0, 1250.0, 1530.0] {
+                let ctx = egui::Context::default();
+                crate::theme::apply_theme(&ctx, &themes, &themes, theme).unwrap();
+                let mut workshop = WorkshopState::new(&base);
+                workshop.fetched = true;
+                workshop.catalog = (0..40).map(|i| serde_json::json!({"id":format!("map-{i}"),"name":format!("Map {i}"),"author":"Map author","banner_path":""})).collect();
+                workshop.execute_search(true);
+                let (tx, _rx) = crossbeam_channel::unbounded();
+                let mut output = egui::FullOutput::default();
+                for _ in 0..3 {
+                    output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 1000.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            egui::CentralPanel::default().show(ui, |ui| {
+                                workshop.render(
+                                    ui,
+                                    "",
+                                    &crate::config::RlLaunchCfg::default(),
+                                    &tx,
+                                );
+                                assert!(
+                                    ui.min_rect().right() <= width + 1.0,
+                                    "Map content overflows at {theme}/{width}"
+                                );
+                            });
+                        },
+                    );
+                }
+                assert!(
+                    workshop.page_size.is_multiple_of(3) && (3..=18).contains(&workshop.page_size)
+                );
+                fn text(shape: &egui::Shape, needle: &str) -> bool {
+                    match shape {
+                        egui::Shape::Text(t) => t.galley.text().contains(needle),
+                        egui::Shape::Vec(v) => v.iter().any(|s| text(s, needle)),
+                        _ => false,
+                    }
+                }
+                for content in ["Map 0", "Map author", "Download for", "(40 items)"] {
+                    assert!(
+                        output.shapes.iter().any(|s| text(&s.shape, content)),
+                        "Map tile content missing: {content} ({theme}/{width})"
+                    );
+                }
+                workshop.search = "absent".into();
+                workshop.execute_search(true);
+                assert!(workshop.valid.is_empty());
+                assert_eq!(workshop.page, 0);
+            }
+        }
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let resolved = base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved != temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
+    #[test]
+    fn theme_shells_and_workshop_render_headlessly_at_supported_sizes() {
+        let base = std::env::temp_dir().join(format!("hebnix-theme-layout-{}", std::process::id()));
+        let mut workshop = WorkshopState::new(&base);
+        workshop.catalog = (0..6).map(|i| serde_json::json!({"id":format!("test-{i}"),"name":format!("Sample map {i}"),"author":"Example","banner_path":""})).collect();
+        let indices: Vec<usize> = (0..6).collect();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
+        for name in ["Carbon Studio", "Ocean Workspace", "Crimson Arena"] {
+            for size in [egui::vec2(1250.0, 700.0), egui::vec2(1536.0, 900.0)] {
+                let ctx = egui::Context::default();
+                crate::theme::apply_theme(&ctx, &dir, &dir, name).unwrap();
+                let p = crate::theme::presentation(&ctx).unwrap();
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    crate::theme::show_shell(ui, &p, |ui, part| match part {
+                        crate::theme::ShellPart::Navigation(vertical) => {
+                            if vertical {
+                                ui.label("Hebnix");
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.label("Hebnix");
+                                });
+                            }
+                        }
+                        crate::theme::ShellPart::Content => {
+                            assert!(workshop.render_themed_library(ui, &indices, &p).is_none());
+                        }
+                    });
+                });
+                assert!(!output.shapes.is_empty());
+            }
+        }
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let resolved = base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved != temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
+
+    fn all_shapes<'a>(shape: &'a egui::Shape, result: &mut Vec<&'a egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    all_shapes(shape, result)
+                }
+            }
+            _ => result.push(shape),
+        }
+    }
+    #[test]
+    fn themed_tiles_keep_fixed_rectangles_across_images_states_and_columns() {
+        let base = std::env::temp_dir().join(format!("hebnix-fixed-tiles-{}", std::process::id()));
+        let mut workshop = WorkshopState::new(&base);
+        workshop.target = "Utopia Retro".into();
+        workshop.catalog=(0..8).map(|i|serde_json::json!({
+            "id":format!("tile-{i}"),"name":if i==1 {"A deliberately very long map title that must not grow its tile".to_string()} else {format!("Tile {i}")},
+            "author":if i==2 {"A creator name that is far too long to fit".to_string()} else {format!("Creator {i}")},
+            "banner_path":format!("banner-{i}")
+        })).collect();
+        for (i, (width, height)) in [
+            (0, (512, 128)),
+            (1, (128, 256)),
+            (2, (256, 256)),
+            (3, (320, 180)),
+        ] {
+            let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                width,
+                height,
+                image::Rgba([80, 120, 160, 255]),
+            ));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
+            workshop.images.insert(
+                format!("banner-{i}"),
+                ImageState::Ready(encoded.into_inner().into()),
+            );
+        }
+        workshop
+            .images
+            .insert("banner-4".into(), ImageState::Loading);
+        workshop
+            .images
+            .insert("banner-5".into(), ImageState::Failed);
+        for id in ["tile-0", "tile-2", "tile-6"] {
+            std::fs::write(
+                workshop.manager.cache_dir.join(format!("{id}.upk")),
+                b"test",
+            )
+            .unwrap();
+        }
+        workshop
+            .manager
+            .active_maps
+            .lock()
+            .unwrap()
+            .insert("Utopia Retro".into(), serde_json::json!({"id":"tile-2"}));
+        workshop.busy.insert("tile-3".into());
+        let indices: Vec<usize> = (0..8).collect();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
+        for (columns, width, font, horizontal) in [
+            (4, 1250.0, 14.0, false),
+            (3, 1250.0, 14.0, false),
+            (4, 760.0, 22.0, false),
+            (4, 360.0, 22.0, false),
+            (3, 1250.0, 22.0, true),
+        ] {
+            let ctx = egui::Context::default();
+            egui_extras::install_image_loaders(&ctx);
+            crate::theme::apply_theme(&ctx, &dir, &dir, "Ocean Studio Dark").unwrap();
+            ctx.style_mut_of(ctx.theme(), |style| {
+                style
+                    .text_styles
+                    .insert(egui::TextStyle::Button, egui::FontId::proportional(font));
+                if font > 14.0 {
+                    style.spacing.button_padding = egui::vec2(24.0, 16.0);
+                    style
+                        .text_styles
+                        .insert(egui::TextStyle::Small, egui::FontId::proportional(18.0));
+                }
+            });
+            let mut p = (*crate::theme::presentation(&ctx).unwrap()).clone();
+            p.pages.workshop.columns = columns;
+            p.components.map_card.horizontal = horizontal;
+            let mut output = egui::FullOutput::default();
+            for _ in 0..4 {
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 5000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        assert!(workshop.render_themed_library(ui, &indices, &p).is_none());
+                    },
+                );
+            }
+            let mut shapes = Vec::new();
+            for clipped in &output.shapes {
+                all_shapes(&clipped.shape, &mut shapes);
+            }
+            let tiles: Vec<egui::Rect> = shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect)
+                        if rect.fill == crate::theme::color(&p.components.map_card.surface) =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                tiles.len(),
+                8,
+                "Missing tiles at {width}/{font}/{horizontal}"
+            );
+            for rect in &tiles {
+                assert!(
+                    (rect.width() - tiles[0].width()).abs() < 0.1
+                        && (rect.height() - tiles[0].height()).abs() < 0.1,
+                    "Nonuniform tile {rect:?} vs {:?}",
+                    tiles[0]
+                );
+                assert!(rect.width() <= width && rect.left() >= 0.0 && rect.right() <= width);
+            }
+            let actual_columns = tiles
+                .iter()
+                .take_while(|r| (r.top() - tiles[0].top()).abs() < 1.0)
+                .count();
+            assert_eq!(
+                actual_columns,
+                crate::ui::browser::columns_for_width(
+                    width,
+                    10.0,
+                    p.components.map_card.min_width.max(224.0)
+                )
+            );
+            for (i, rect) in tiles.iter().enumerate() {
+                for other in tiles.iter().skip(i + 1) {
+                    assert!(!rect.intersects(*other), "Tiles overlap");
+                }
+                let texts: Vec<_> = shapes
+                    .iter()
+                    .filter_map(|shape| match shape {
+                        egui::Shape::Text(text) if rect.contains(text.pos) => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                let action = texts
+                    .iter()
+                    .find(|text| {
+                        text.galley.text().starts_with("Load to ")
+                            || text.galley.text().starts_with("Unload ")
+                            || text.galley.text().starts_with("Download for ")
+                            || text.galley.text() == t("tab-working")
+                    })
+                    .expect("Tile primary action missing");
+                assert!(
+                    rect.contains_rect(egui::Rect::from_min_size(action.pos, action.galley.size())),
+                    "Action overflows its tile: {:?}",
+                    action.galley.text()
+                );
+                for other in tiles.iter().filter(|r| (r.top() - rect.top()).abs() < 1.0) {
+                    let same_row = shapes
+                        .iter()
+                        .filter_map(|shape| match shape {
+                            egui::Shape::Text(text) if other.contains(text.pos) => Some(text),
+                            _ => None,
+                        })
+                        .find(|text| {
+                            text.galley.text().starts_with("Load to ")
+                                || text.galley.text().starts_with("Unload ")
+                                || text.galley.text().starts_with("Download for ")
+                                || text.galley.text() == t("tab-working")
+                        })
+                        .unwrap();
+                    assert!(
+                        (action.pos.y + action.galley.size().y * 0.5
+                            - same_row.pos.y
+                            - same_row.galley.size().y * 0.5)
+                            .abs()
+                            < 1.0,
+                        "Primary buttons are not aligned"
+                    );
+                }
+            }
+            let images: Vec<_> = shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect) if rect.brush.is_some() => Some(rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(images.len(), 4);
+            // Painting snaps the same logical viewport to physical pixels;
+            // fractional column widths can differ by one raster pixel.
+            for image in &images {
+                assert!(
+                    (image.rect.width() - images[0].rect.width()).abs() <= 1.01
+                        && (image.rect.height() - images[0].rect.height()).abs() <= 1.01
+                );
+            }
+            let uv = images[1].brush.as_ref().unwrap().uv;
+            assert!(
+                uv.height() < 1.0,
+                "Portrait thumbnail must crop within its fixed viewport"
+            );
+        }
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let resolved = base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved != temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
 }

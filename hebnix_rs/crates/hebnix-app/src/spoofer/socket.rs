@@ -3,7 +3,7 @@
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crossbeam_channel::Sender;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -104,6 +104,8 @@ fn accept_loop(
     addr: &str,
 ) {
     tracing::info!("spoofer socket proxy listening on {addr}");
+    let observed_hosts = Arc::new(AtomicU8::new(0));
+    let error_reported = Arc::new(AtomicBool::new(false));
     for stream in listener.incoming() {
         if !running.load(Ordering::Relaxed) {
             break;
@@ -114,9 +116,26 @@ fn accept_loop(
         let upstream = upstream.clone();
         let rules = Arc::clone(rules);
         let tx = tx.clone();
+        let observed_hosts = Arc::clone(&observed_hosts);
+        let error_reported = Arc::clone(&error_reported);
         std::thread::spawn(move || {
-            if let Err(e) = handle_reverse(stream, &server_config, &upstream, &rules, &tx) {
+            if let Err(e) = handle_reverse(
+                stream,
+                &server_config,
+                &upstream,
+                &rules,
+                &tx,
+                &observed_hosts,
+            ) {
                 tracing::debug!("socket proxy conn ended: {e}");
+                if !error_reported.swap(true, Ordering::Relaxed) {
+                    // Upstream errors can contain URLs and account identifiers.
+                    // Keep the detailed error in debug logs, not the Console.
+                    let _ = tx.send(AppMsg::Log(
+                        "[Spoofer] An intercepted connection failed. See the debug log for details. Restart Rocket League after checking the proxy certificate and connection settings."
+                            .into(),
+                    ));
+                }
             }
         });
     }
@@ -129,6 +148,7 @@ fn handle_reverse(
     upstream: &ureq::Agent,
     rules: &Arc<Vec<Box<dyn Rule>>>,
     tx: &Sender<AppMsg>,
+    observed_hosts: &AtomicU8,
 ) -> Result<(), String> {
     let mut conn =
         ServerConnection::new(Arc::clone(server_config)).map_err(|e| format!("tls conn: {e}"))?;
@@ -147,11 +167,17 @@ fn handle_reverse(
         .map(str::to_string)
         .ok_or("no sni on the reverse connection")?;
     tracing::debug!("reverse {host}");
-    if !["api.epicgames.dev", "config.psynet.gg"]
+    let Some(host_index) = ["api.epicgames.dev", "config.psynet.gg"]
         .iter()
-        .any(|allowed| host.eq_ignore_ascii_case(allowed))
-    {
+        .position(|allowed| host.eq_ignore_ascii_case(allowed))
+    else {
         return Err("Host is outside the Hebnix proxy scope".into());
+    };
+    let host_bit = 1 << host_index;
+    if observed_hosts.fetch_or(host_bit, Ordering::Relaxed) & host_bit == 0 {
+        let _ = tx.send(AppMsg::Log(format!(
+            "[Spoofer] Intercepted TLS connection to {host}"
+        )));
     }
 
     let tls = StreamOwned::new(conn, sock);

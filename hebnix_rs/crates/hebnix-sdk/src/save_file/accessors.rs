@@ -659,6 +659,50 @@ impl SaveData {
             .collect()
     }
 
+    /// Title IDs belonging to root inventory members, resolving serialized
+    /// attribute references. Orphan title attributes are deliberately excluded.
+    pub fn owned_title_ids(&self) -> Result<std::collections::HashSet<String>, String> {
+        let references = self
+            .raw_properties
+            .get("OnlineProducts")
+            .and_then(Value::as_array)
+            .ok_or("This save has no supported inventory.")?;
+        let mut titles = std::collections::HashSet::new();
+        for reference in references {
+            let product = reference
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| self.objects.get(index))
+                .ok_or("Invalid saved inventory reference.")?;
+            if product["__type"] != "TAGame.OnlineProduct_TA" {
+                return Err("Unsupported saved inventory object.".into());
+            }
+            let Some(attributes) = product.get("Attributes") else {
+                continue;
+            };
+            let attributes = attributes.as_array().ok_or("Invalid product attributes.")?;
+            for attribute in attributes {
+                let attribute = if attribute.is_object() {
+                    attribute
+                } else {
+                    attribute
+                        .as_u64()
+                        .and_then(|index| usize::try_from(index).ok())
+                        .and_then(|index| self.objects.get(index))
+                        .ok_or("Invalid saved product attribute reference.")?
+                };
+                if attribute["__type"] == "TAGame.ProductAttribute_TitleID_TA" {
+                    let id = attribute["TitleId"]
+                        .as_str()
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or("Invalid saved title ID.")?;
+                    titles.insert(id.to_string());
+                }
+            }
+        }
+        Ok(titles)
+    }
+
     pub fn favorite_instance_ids(&self) -> Vec<u64> {
         get_object(&self.objects, "TAGame.ProductsFavoriteSave_TA")
             .and_then(|raw| raw.get("InstanceIDs128"))
@@ -912,5 +956,54 @@ impl SaveData {
     /// all raw objects matching type_name
     pub fn objects_by_type(&self, type_name: &str) -> Vec<&Value> {
         get_objects(&self.objects, type_name)
+    }
+}
+
+#[cfg(test)]
+mod owned_title_tests {
+    use super::*;
+    fn fixture(references: Value, objects: Vec<Value>) -> SaveData {
+        SaveData {
+            source_file: PathBuf::new(),
+            header: Default::default(),
+            raw_properties: json!({"OnlineProducts":references}),
+            objects,
+        }
+    }
+    #[test]
+    fn owned_titles_follow_inventory_and_attribute_membership() {
+        let save = fixture(
+            json!([0, 1]),
+            vec![
+                json!({"__type":"TAGame.OnlineProduct_TA","Attributes":[2]}),
+                json!({"__type":"TAGame.OnlineProduct_TA","Attributes":[2,{"__type":"TAGame.ProductAttribute_TitleID_TA","TitleId":"Other"}]}),
+                json!({"__type":"TAGame.ProductAttribute_TitleID_TA","TitleId":"Owned"}),
+                json!({"__type":"TAGame.ProductAttribute_TitleID_TA","TitleId":"Orphan"}),
+                json!({"__type":"TAGame.OnlineProduct_TA","Attributes":[3]}),
+            ],
+        );
+        assert_eq!(
+            save.owned_title_ids().unwrap(),
+            std::collections::HashSet::from(["Owned".to_string(), "Other".to_string()])
+        );
+    }
+    #[test]
+    fn missing_or_bad_title_references_are_errors_but_empty_inventory_is_valid() {
+        assert!(
+            fixture(json!([]), vec![])
+                .owned_title_ids()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(fixture(json!([99]), vec![]).owned_title_ids().is_err());
+        assert!(
+            fixture(
+                json!([0]),
+                vec![json!({"__type":"TAGame.OnlineProduct_TA","Attributes":[99]})]
+            )
+            .owned_title_ids()
+            .is_err()
+        );
+        assert!(fixture(json!([0]),vec![json!({"__type":"TAGame.OnlineProduct_TA","Attributes":[{"__type":"TAGame.ProductAttribute_TitleID_TA"}]})]).owned_title_ids().is_err());
     }
 }

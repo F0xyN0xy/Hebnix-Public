@@ -2176,11 +2176,22 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                 .flatten()
                 .map(|entry| entry.path())
                 .filter(|path| {
-                    path.extension()
+                    path.is_file() && path.extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("save"))
                 })
                 .collect();
-            paths.sort();
+            // Plugins that select the first file should get the same newest-first
+            // fallback as find_save_file/find_save_accounts and owned items.
+            paths.sort_by_cached_key(|path| {
+                (
+                    std::cmp::Reverse(
+                        std::fs::metadata(path)
+                            .and_then(|meta| meta.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH),
+                    ),
+                    path.clone(),
+                )
+            });
             for (index, path) in paths.iter().enumerate() {
                 files.set(index + 1, path.to_string_lossy().to_string())?;
             }

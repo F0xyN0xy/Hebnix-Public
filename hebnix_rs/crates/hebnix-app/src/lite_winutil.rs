@@ -6,15 +6,13 @@ use raw_window_handle::{
     Win32WindowHandle, WindowHandle,
 };
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
-use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, GetWindowThreadProcessId,
-    HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, LWA_ALPHA, SW_RESTORE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowLongW, SetWindowPos, ShowWindow, SwitchToThisWindow, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
+    HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, SW_RESTORE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, SwitchToThisWindow,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -26,12 +24,7 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 fn main_window() -> Option<HWND> {
-    let title = wide("Hebnix Lite");
-    unsafe {
-        FindWindowW(None, PCWSTR(title.as_ptr()))
-            .ok()
-            .filter(|window| !window.is_invalid())
-    }
+    crate::window_state::main_window()
 }
 
 pub fn acquire_single_instance() -> Option<HANDLE> {
@@ -43,7 +36,9 @@ pub fn acquire_single_instance() -> Option<HANDLE> {
 }
 
 pub fn focus_existing_instance() {
-    if let Some(window) = main_window() {
+    // Only the second-instance path needs to find another process's window.
+    let title = wide("Hebnix Lite");
+    if let Ok(window) = unsafe { FindWindowW(None, PCWSTR(title.as_ptr())) } {
         let _ = focus_window(window);
     }
 }
@@ -174,38 +169,6 @@ pub fn main_window_hidden() -> bool {
     HIDDEN.load(Ordering::Relaxed)
 }
 
-thread_local! {
-    // com object, not Send
-    static TASKBAR: std::cell::RefCell<Option<ITaskbarList>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn set_taskbar_button(window: HWND, shown: bool) {
-    TASKBAR.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            let list = unsafe {
-                CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok()
-            };
-            if let Some(list) = &list {
-                unsafe {
-                    let _ = list.HrInit();
-                }
-            }
-            *slot = list;
-        }
-        if let Some(list) = slot.as_ref() {
-            unsafe {
-                let _ = if shown {
-                    list.AddTab(window)
-                } else {
-                    list.DeleteTab(window)
-                };
-            }
-        }
-    });
-}
-
 /// an alpha 0 window is still a normal one to the os. NOACTIVATE stops it being
 /// handed the foreground, TOOLWINDOW drops it from alt-tab. read live, no frame
 /// change, that would resize the client area.
@@ -230,7 +193,6 @@ pub fn set_main_window_invisible(invisible: bool) {
                     0,
                     LWA_ALPHA,
                 );
-                set_taskbar_button(window, false);
             } else {
                 SetWindowLongW(window, GWL_EXSTYLE, style & !hidden_bits());
                 let _ = SetLayeredWindowAttributes(
@@ -239,17 +201,10 @@ pub fn set_main_window_invisible(invisible: bool) {
                     255,
                     LWA_ALPHA,
                 );
-                set_taskbar_button(window, true);
+                if !IsWindowVisible(window).as_bool() {
+                    let _ = ShowWindow(window, SW_SHOW);
+                }
             }
-        }
-    }
-}
-
-pub fn show_main_window_from_tray() {
-    set_main_window_invisible(false);
-    if let Some(window) = main_window() {
-        unsafe {
-            let _ = ShowWindow(window, SW_SHOW);
         }
     }
 }

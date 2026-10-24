@@ -94,8 +94,6 @@ impl RepairState {
 }
 
 fn repair() -> Result<(), String> {
-    crate::hosts_file::clear()
-        .map_err(|error| format!("Could not clear Hebnix hosts redirects: {error}"))?;
     crate::winutil::clear_rocket_league_web_cache()
         .map_err(|error| format!("Could not clear Rocket League WebCache: {error}"))?;
     use std::os::windows::process::CommandExt;

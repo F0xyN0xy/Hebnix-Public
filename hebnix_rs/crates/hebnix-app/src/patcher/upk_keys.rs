@@ -1,4 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use std::sync::OnceLock;
 
 // Try Rocket League's default package key before the embedded catalog.
 // file order made large packages such as Startup.upk get AES-decrypted almost
@@ -9,10 +10,31 @@ pub const DEFAULT_UPK_KEY: [u8; 32] = [
 ];
 
 pub fn embedded() -> Result<Vec<(usize, [u8; 32])>, String> {
-    parse(
-        include_str!("../../assets/upk_keys.txt"),
-        "embedded UPK key catalog",
-    )
+    // The bundled catalogue is immutable for the lifetime of this executable.
+    // Title staging opens hundreds of packages; avoid repeatedly decoding and
+    // deduplicating the same keys on every open and verification pass.
+    static KEYS: OnceLock<Result<Vec<(usize, [u8; 32])>, String>> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        parse(
+            include_str!("../../assets/upk_keys.txt"),
+            "embedded UPK key catalog",
+        )
+    })
+    .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_callers_cannot_change_subsequent_package_keys() {
+        let mut first = embedded().unwrap();
+        assert_eq!(first[0], (0, DEFAULT_UPK_KEY));
+        let expected = first.clone();
+        first.clear();
+        assert_eq!(embedded().unwrap(), expected);
+    }
 }
 
 pub fn parse(text: &str, source: &str) -> Result<Vec<(usize, [u8; 32])>, String> {

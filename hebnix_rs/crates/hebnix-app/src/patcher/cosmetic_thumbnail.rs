@@ -1,5 +1,5 @@
 use crate::patch_core::upk;
-use crate::patcher::upk_package::{ExportEntry, UpkPackage};
+use crate::patcher::upk_package::{ExportEntry, UpkPackage, strip};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -257,18 +257,65 @@ pub(crate) fn texture(
     Err(last_error)
 }
 
-pub fn extract_png(path: &Path, _category: &str) -> Result<Vec<u8>, String> {
+/// Give uncoloured decal artwork a consistent preview palette. This is a UI
+/// treatment, not an in-game paint colour; authored colour thumbnails are kept.
+fn colour_decal_preview(image: &mut RgbaImage) {
+    // DXT greys can differ slightly between channels because RGB565 gives green
+    // an extra bit. Ignore that quantisation, but retain even small colour accents.
+    if image.pixels().any(|pixel| {
+        let [r, g, b, a] = pixel.0;
+        a != 0 && r.max(g).max(b) - r.min(g).min(b) > 12
+    }) {
+        return;
+    }
+
+    // Black stays black, midtones become blue, and highlights become pale cyan.
+    // A monotonic ramp preserves the texture's pattern, lighting and contrast.
+    const RAMP: [(u16, [u16; 3]); 4] = [
+        (0, [0, 0, 0]),
+        (85, [15, 55, 100]),
+        (170, [35, 155, 220]),
+        (255, [210, 245, 255]),
+    ];
+    for pixel in image.pixels_mut() {
+        let [r, g, b, _] = pixel.0;
+        let grey = (r as u16 + g as u16 + b as u16) / 3;
+        let segment = ((grey / 85) as usize).min(RAMP.len() - 2);
+        let (start, low) = RAMP[segment];
+        let (end, high) = RAMP[segment + 1];
+        for channel in 0..3 {
+            pixel[channel] =
+                (low[channel] + (high[channel] - low[channel]) * (grey - start) / (end - start))
+                    as u8;
+        }
+    }
+}
+
+pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
     let package = UpkPackage::load(path)?;
+    let requested = category
+        .strip_prefix("skins|")
+        .and_then(|asset| asset.rsplit('.').next());
     let directory = path.parent().ok_or("Thumbnail has no parent directory")?;
     // Follow ProductThumbnailAsset's reference, rather than choosing whichever
     // Texture2D happens to occur last in a multi-texture package.
     let mut indices = Vec::new();
+    let thumbnail_count = package.exports.iter().filter(|export|package.class_of(export).starts_with("ProductThumbnailAsset")).count();
     for export in &package.exports {
         if !package
             .class_of(export)
             .starts_with("ProductThumbnailAsset")
         {
             continue;
+        }
+        if thumbnail_count > 1 && let Some(leaf) = requested {
+            let name = package.name_of(export.object_name);
+            let name = strip(&name);
+            if !name.eq_ignore_ascii_case(&format!("{leaf}_T"))
+                && !name.eq_ignore_ascii_case(&format!("{leaf}_TThumbnail"))
+            {
+                continue;
+            }
         }
         if let Ok((props, _)) = package.serialized_props(export) {
             for prop in props
@@ -283,7 +330,7 @@ pub fn extract_png(path: &Path, _category: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    if indices.is_empty() {
+    if indices.is_empty() && requested.is_none() {
         indices.extend(
             package
                 .exports
@@ -302,7 +349,10 @@ pub fn extract_png(path: &Path, _category: &str) -> Result<Vec<u8>, String> {
             continue;
         }
         match texture(&package, export, directory) {
-            Ok(image) => {
+            Ok(mut image) => {
+                if category == "skins" || category.starts_with("skins|") {
+                    colour_decal_preview(&mut image);
+                }
                 let image = DynamicImage::ImageRgba8(image);
                 let image = if image.width() > 512 || image.height() > 512 {
                     image.thumbnail(512, 512)
@@ -333,6 +383,16 @@ pub(crate) fn bake_texture(
     pixels: &RgbaImage,
 ) -> Result<Vec<u8>, String> {
     let bytes = bake_texture_encoded(package, export, pixels, false)?;
+    make_texture_resident(package, export, bytes)
+}
+
+/// Bake a mask-bearing diffuse atlas without discarding its alpha channel.
+pub(crate) fn bake_texture_alpha(
+    package: &UpkPackage,
+    export: &ExportEntry,
+    pixels: &RgbaImage,
+) -> Result<Vec<u8>, String> {
+    let bytes = bake_texture_encoded(package, export, pixels, true)?;
     make_texture_resident(package, export, bytes)
 }
 

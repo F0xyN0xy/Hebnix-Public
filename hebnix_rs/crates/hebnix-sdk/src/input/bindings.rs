@@ -419,4 +419,6 @@ pub fn detect_any_hotkey(timeout: Option<Duration>) -> Option<HotkeyBind> {
 /// monitor thread, xinput needs no init.
 pub fn init_controllers() {
     start_dinput_monitor();
+    // Start discovery while the app initializes, before plugins begin polling.
+    super::game_actions::init_action_bind_cache();
 }

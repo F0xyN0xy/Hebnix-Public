@@ -1,5 +1,5 @@
 use crate::config::{Config, PatchSource};
-use crate::i18n::{t, t_args};
+use crate::i18n::t;
 use crate::messages::AppMsg;
 use crate::patcher::catalog::PatchCatalog;
 use crate::patcher::{backup_guard, patch_source_selector};
@@ -46,9 +46,18 @@ pub struct CarPatcherState {
     pub active_cars: HashMap<String, String>,
     pub(crate) source: PatchSource,
     search: String,
+    page: usize,
     bodies_catalog: Option<Value>,
     catalog_error: Option<String>,
     catalog: PatchCatalog,
+    fallback_image: Arc<[u8]>,
+}
+
+#[derive(Clone, Copy)]
+enum TileAction {
+    Apply,
+    Restore,
+    Delete,
 }
 
 fn catalog_id(value: Option<&Value>) -> Option<i32> {
@@ -191,9 +200,11 @@ impl CarPatcherState {
             active_cars: config.patcher.active_cars.clone(),
             source: config.patcher.car_source,
             search: String::new(),
+            page: 0,
             bodies_catalog: None,
             catalog_error: None,
             catalog: PatchCatalog::new(base_dir, "car"),
+            fallback_image: crate::ui::browser::fallback_image(base_dir),
         };
         state.refresh_cars();
         state
@@ -568,12 +579,11 @@ impl CarPatcherState {
         }
         let target_upk = upk_file_name(target_upk)?;
         let car_backups = Self::backup_dir(backups_dir);
-        if let Err(error) = backup_guard::check(
-            cooked_pc,
-            &car_backups,
-            "car-build.sha256",
-            |name| name.to_ascii_lowercase().ends_with(".upk.bak"),
-        ) {
+        if let Err(error) =
+            backup_guard::check(cooked_pc, &car_backups, "car-build.sha256", |name| {
+                name.to_ascii_lowercase().ends_with(".upk.bak")
+            })
+        {
             if error.starts_with("Rocket League was updated") {
                 self.active_cars.clear();
                 config.patcher.active_cars.clear();
@@ -628,8 +638,44 @@ impl CarPatcherState {
         tx: &Sender<AppMsg>,
         config: &mut Config,
     ) {
-        ui.heading(t("app-car-patcher"));
-        ui.add_space(10.0);
+        crate::ui::browser::header(ui, t("app-car-patcher"), |ui| {
+            if ui
+                .add_enabled(
+                    !self.active_cars.is_empty(),
+                    egui::Button::new(t("ball-restore-original"))
+                        .fill(egui::Color32::from_rgb(180, 50, 50)),
+                )
+                .clicked()
+            {
+                if let Err(error) = self.restore_all(cooked_pc, backups_dir, tx, config) {
+                    let _ = tx.send(AppMsg::Log(format!("[Cars] Restore failed: {error}")));
+                }
+            }
+            if ui.button(t("ball-import-zip")).clicked() {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    if let Err(error) = self.import_zip(&file, tx) {
+                        let _ = tx.send(AppMsg::Log(format!("[Cars] Import failed: {error}")));
+                    }
+                }
+            }
+            if ui.button(t("btn-refresh")).clicked() {
+                if self.source == PatchSource::Catalog {
+                    self.catalog.refresh(ctx);
+                } else {
+                    self.refresh_cars();
+                }
+            }
+        });
+        ui.add_space(8.0);
+        let hint = t(if self.source == PatchSource::Catalog {
+            "ball-name-or-author"
+        } else {
+            "tab-search-local-patches"
+        });
+        if crate::ui::browser::search(ui, &mut self.search, hint) {
+            self.page = 0;
+        }
         if patch_source_selector(ui, &mut self.source) {
             config.patcher.car_source = self.source;
             let _ = config.save(&self.base_dir);
@@ -637,7 +683,7 @@ impl CarPatcherState {
         ui.add_space(8.0);
 
         if self.source == PatchSource::Catalog {
-            if let Some(zip) = self.catalog.render(ui, &self.search, ctx, tx, 4) {
+            if let Some(zip) = self.catalog.render(ui, &self.search, ctx, tx) {
                 match self.import_zip(&zip, tx) {
                     Ok(_) => {
                         self.source = PatchSource::Custom;
@@ -654,36 +700,24 @@ impl CarPatcherState {
             return;
         }
 
-        ui.horizontal(|ui| {
-            if ui.button(t("ball-import-zip")).clicked() {
-                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
-                if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
-                    if let Err(error) = self.import_zip(&file, tx) {
-                        let _ = tx.send(AppMsg::Log(format!("[Cars] Import failed: {error}")));
-                    }
-                }
-            }
-            if ui.button(t("btn-refresh")).clicked() {
-                self.refresh_cars();
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text(t("tab-search-local-patches")),
-            );
-        });
         ui.separator();
 
         if let Some(error) = &self.catalog_error {
             ui.colored_label(egui::Color32::from_rgb(0xe7, 0x4c, 0x3c), error);
         }
         let query = self.search.trim().to_ascii_lowercase();
-        let visible = self
+        let mut filtered = self
             .cars
             .iter()
             .filter(|car| query.is_empty() || car.name.to_ascii_lowercase().contains(&query))
             .cloned()
             .collect::<Vec<_>>();
-        if visible.is_empty() {
+        // Keep usable patches first without adding section headings between tile rows.
+        filtered.sort_by_key(|car| car.support.is_err());
+        let columns = crate::ui::browser::columns(ui, 224.0);
+        let page_size = columns * crate::ui::browser::ROWS;
+        crate::ui::browser::pagination(ui, &mut self.page, filtered.len(), page_size);
+        if filtered.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(30.0);
                 ui.weak(t("tab-no-local-car-patches-import-a"));
@@ -691,124 +725,190 @@ impl CarPatcherState {
             return;
         }
 
+        let visible: Vec<_> = filtered
+            .into_iter()
+            .skip(self.page * page_size)
+            .take(page_size)
+            .collect();
+        let row_height = (ui.available_height()
+            - ui.spacing().item_spacing.y * (crate::ui::browser::ROWS - 1) as f32)
+            / crate::ui::browser::ROWS as f32;
+        let tile_height = crate::ui::browser::tile_height(ui).min(row_height);
+        let mut action = None;
         egui::ScrollArea::vertical()
             .id_salt("car_patcher_local")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                let (supported, unsupported): (Vec<_>, Vec<_>) =
-                    visible.into_iter().partition(|car| car.support.is_ok());
-                if !supported.is_empty() {
-                    ui.heading(t_args(
-                        "tab-supported-patches-supported",
-                        &[("supported", (supported.len()).to_string().into())],
-                    ));
-                    ui.weak(t("tab-these-packages-can-safely-replace-their"));
-                    ui.add_space(6.0);
-                }
-                let supported_count = supported.len();
-                let mut ordered = supported;
-                ordered.extend(unsupported);
-                for (index, car) in ordered.into_iter().enumerate() {
-                    if index == supported_count {
-                        if index > 0 {
-                            ui.add_space(10.0);
+                for row in visible.chunks(columns) {
+                    ui.columns(columns, |uis| {
+                        for (column, car) in row.iter().enumerate() {
+                            if let Some(clicked) =
+                                self.render_tile(&mut uis[column], car, tile_height)
+                            {
+                                action = Some((car.clone(), clicked));
+                            }
                         }
-                        ui.heading(t("tab-not-supported"));
-                        ui.weak(t("tab-kept-for-reference-applying-these-profil"));
-                        ui.add_space(6.0);
-                    }
-                    let resolved = self.resolve_body(car.body_id);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let bytes = car
-                                .thumbnail
-                                .clone()
-                                .unwrap_or_else(|| Arc::from(crate::tray::EMBEDDED_ICON));
-                            ui.add(
-                                egui::Image::from_bytes(
-                                    format!("bytes://car-patch/{}", car.json_path.display()),
-                                    bytes,
-                                )
-                                .fit_to_exact_size(egui::vec2(108.0, 72.0)),
-                            );
-                            ui.vertical(|ui| match (&car.support, &resolved) {
-                                (Ok(()), Ok(target)) => {
-                                    ui.strong(t_args(
-                                        "tab-patching-target-to-car",
-                                        &[
-                                            ("target", target.name.to_string().into()),
-                                            ("car", car.name.to_string().into()),
-                                        ],
-                                    ));
-                                }
-                                (Err(error), _) | (_, Err(error)) => {
-                                    ui.strong(&car.name);
-                                    ui.colored_label(egui::Color32::from_rgb(230, 160, 60), error);
-                                }
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if let Ok(target) = &resolved {
-                                        if self.active_cars.contains_key(&target.upk_path) {
-                                            if ui.button(t("ball-restore-original")).clicked() {
-                                                if let Err(error) = self.restore(
-                                                    &target.upk_path,
-                                                    cooked_pc,
-                                                    backups_dir,
-                                                    tx,
-                                                    config,
-                                                ) {
-                                                    let _ = tx.send(AppMsg::Log(format!(
-                                                        "[Cars] Restore failed: {error}"
-                                                    )));
-                                                }
-                                            }
-                                        } else if ui
-                                            .add_enabled(
-                                                car.support.is_ok(),
-                                                egui::Button::new(if car.support.is_ok() {
-                                                    t("ball-apply")
-                                                } else {
-                                                    t("tab-not-supported")
-                                                }),
-                                            )
-                                            .clicked()
-                                        {
-                                            if let Err(error) =
-                                                self.apply(&car, cooked_pc, backups_dir, tx, config)
-                                            {
-                                                let _ = tx.send(AppMsg::Log(format!(
-                                                    "[Cars] Patch failed: {error}"
-                                                )));
-                                            }
-                                        }
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            !resolved.as_ref().is_ok_and(|target| {
-                                                self.active_cars.contains_key(&target.upk_path)
-                                            }),
-                                            egui::Button::new(t("presets-delete")),
-                                        )
-                                        .clicked()
-                                    {
-                                        if let Err(error) = self.delete_local_patch(&car) {
-                                            let _ = tx.send(AppMsg::Log(format!(
-                                                "[Cars] Delete failed: {error}"
-                                            )));
-                                        } else {
-                                            let _ = tx.send(AppMsg::Log(format!(
-                                                "[Cars] Deleted local patch '{}'.",
-                                                car.name
-                                            )));
-                                        }
-                                    }
-                                },
-                            );
-                        });
                     });
-                    ui.add_space(6.0);
                 }
             });
+        if let Some((car, action)) = action {
+            let result = match action {
+                TileAction::Apply => self.apply(&car, cooked_pc, backups_dir, tx, config),
+                TileAction::Restore => self.resolve_body(car.body_id).and_then(|target| {
+                    self.restore(&target.upk_path, cooked_pc, backups_dir, tx, config)
+                }),
+                TileAction::Delete => self.delete_local_patch(&car).map(|()| {
+                    let _ = tx.send(AppMsg::Log(format!(
+                        "[Cars] Deleted local patch '{}'.",
+                        car.name
+                    )));
+                }),
+            };
+            if let Err(error) = result {
+                let _ = tx.send(AppMsg::Log(format!("[Cars] Action failed: {error}")));
+            }
+        }
+    }
+
+    fn render_tile(&self, ui: &mut egui::Ui, car: &CarPatch, height: f32) -> Option<TileAction> {
+        let resolved = self.resolve_body(car.body_id);
+        let active = resolved
+            .as_ref()
+            .ok()
+            .and_then(|target| self.active_cars.get(&target.upk_path));
+        let applied = active.is_some_and(|name| name == &car.name);
+        let style = crate::ui::browser::frame(ui, applied);
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .rect_filled(rect, style.corner_radius, style.fill);
+        let content = rect.shrink(10.0);
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let subtitle_font = egui::FontId::new((body_font.size - 2.0).max(10.0), body_font.family);
+        let subtitle_height = ui.fonts_mut(|fonts| fonts.row_height(&subtitle_font));
+        let button_height = (ui.text_style_height(&egui::TextStyle::Button)
+            + ui.spacing().button_padding.y * 2.0)
+            .max(ui.spacing().interact_size.y);
+        let footer_height = ui.text_style_height(&egui::TextStyle::Body)
+            + subtitle_height
+            + button_height
+            + ui.spacing().item_spacing.y * 3.0;
+        let image_rect = egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(content.right(), content.bottom() - footer_height),
+        );
+        let bytes = car
+            .thumbnail
+            .clone()
+            .unwrap_or_else(|| self.fallback_image.clone());
+        ui.place(
+            image_rect,
+            egui::Image::from_bytes(
+                format!(
+                    "bytes://car-patch/{}/{:08x}",
+                    car.json_path.display(),
+                    crc32fast::hash(&bytes)
+                ),
+                bytes,
+            )
+            .fit_to_exact_size(image_rect.size())
+            .maintain_aspect_ratio(true),
+        );
+        let footer = egui::Rect::from_min_max(
+            egui::pos2(
+                content.left(),
+                image_rect.bottom() + ui.spacing().item_spacing.y,
+            ),
+            content.max,
+        );
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 1.0, image_rect.bottom()),
+                rect.max - egui::vec2(1.0, 1.0),
+            ),
+            style.corner_radius,
+            ui.visuals().extreme_bg_color,
+        );
+        let mut action = None;
+        let mut footer_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("car_patch_tile", &car.json_path, &car.name))
+                .max_rect(footer)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        {
+            let ui = &mut footer_ui;
+            ui.shrink_clip_rect(footer);
+            ui.add(egui::Label::new(egui::RichText::new(&car.name).strong()).truncate())
+                .on_hover_text(&car.name);
+            let target_name = resolved
+                .as_ref()
+                .map(|target| target.name.clone())
+                .unwrap_or_else(|_| format!("BodyID {}", car.body_id));
+            ui.add(
+                egui::Label::new(egui::RichText::new(&target_name).font(subtitle_font).weak())
+                    .truncate(),
+            )
+            .on_hover_text(&target_name);
+            ui.horizontal(|ui| {
+                if active.is_some() {
+                    if ui.button(t("ball-restore-original")).clicked() {
+                        action = Some(TileAction::Restore);
+                    }
+                } else {
+                    let error = car
+                        .support
+                        .as_ref()
+                        .err()
+                        .or_else(|| resolved.as_ref().err());
+                    let response = ui.add_enabled(
+                        error.is_none(),
+                        egui::Button::new(t(if error.is_none() {
+                            "ball-apply"
+                        } else {
+                            "tab-not-supported"
+                        })),
+                    );
+                    if response.clicked() {
+                        action = Some(TileAction::Apply);
+                    }
+                    if let Some(error) = error {
+                        response.on_disabled_hover_text(error);
+                    }
+                }
+                if ui
+                    .add_enabled(active.is_none(), egui::Button::new(t("presets-delete")))
+                    .clicked()
+                {
+                    action = Some(TileAction::Delete);
+                }
+            });
+        }
+        if applied {
+            ui.painter().text(
+                image_rect.left_top(),
+                egui::Align2::LEFT_TOP,
+                t("items-browser-applied"),
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().selection.stroke.color,
+            );
+        }
+        let focused = ui
+            .memory(|memory| memory.focused())
+            .and_then(|id| ui.ctx().read_response(id))
+            .is_some_and(|response| rect.contains_rect(response.rect));
+        let stroke = if focused || ui.rect_contains_pointer(rect) {
+            egui::Stroke::new(
+                if focused { 2.0 } else { 1.0 },
+                ui.visuals().selection.stroke.color,
+            )
+        } else {
+            style.stroke
+        };
+        ui.painter()
+            .rect_stroke(rect, style.corner_radius, stroke, egui::StrokeKind::Inside);
+        action
     }
 }

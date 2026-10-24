@@ -19,7 +19,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.2.4";
+pub const APP_VERSION: &str = "2.2.6";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -80,12 +80,14 @@ struct InstallModal {
 
 pub struct LiteApp {
     base_dir: std::path::PathBuf,
+    pending_installs: crate::deep_link::PendingInstalls,
     themes_dir: std::path::PathBuf,
     fonts_dir: std::path::PathBuf,
     plugin_dir: std::path::PathBuf,
     config: Config,
     tx: Sender<AppMsg>,
     rx: Receiver<AppMsg>,
+    control_rx: Receiver<AppMsg>,
     stats: Arc<StatsClient>,
     ws_stats: Arc<WsStatsClient>,
     stats_tx: Sender<StatsEvent>,
@@ -150,6 +152,7 @@ pub struct LiteApp {
 
 impl LiteApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::window_state::init(cc);
         hebnix_sdk::input::init_controllers();
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let base_dir = crate::config::base_dir();
@@ -195,6 +198,7 @@ impl LiteApp {
         theme::apply_window_opacity(&cc.egui_ctx, config.settings.window_opacity);
 
         let (tx, rx) = crossbeam_channel::unbounded();
+        let (control_tx, control_rx) = crossbeam_channel::unbounded();
         crate::notifications::check_on_start(
             config.notification_id,
             tx.clone(),
@@ -251,30 +255,7 @@ impl LiteApp {
         let start_hidden = config.settings.start_in_tray;
         let tray = Tray::new(&base_dir, "Hebnix Lite", start_hidden);
         if let Some(tray) = &tray {
-            let open_id = tray.open_id.clone();
-            let quit_id = tray.quit_id.clone();
-            let tx = tx.clone();
-            let ctx = cc.egui_ctx.clone();
-            std::thread::Builder::new()
-                .name("lite-tray-forwarder".into())
-                .spawn(move || {
-                    let receiver = tray_icon::menu::MenuEvent::receiver();
-                    while let Ok(event) = receiver.recv() {
-                        if event.id == open_id {
-                            let hidden = !winutil::main_window_hidden();
-                            if hidden {
-                                winutil::set_main_window_invisible(true);
-                            } else {
-                                winutil::show_main_window_from_tray();
-                            }
-                            let _ = tx.send(AppMsg::TrayVisibility(hidden));
-                        } else if event.id == quit_id {
-                            let _ = tx.send(AppMsg::TrayQuit);
-                        }
-                        ctx.request_repaint();
-                    }
-                })
-                .ok();
+            tray.listen(control_tx.clone(), cc.egui_ctx.clone());
         }
 
         let mut hotkey = ToggleHotkey::new();
@@ -282,11 +263,10 @@ impl LiteApp {
             hotkey.rebind(&config.settings.hotkey);
         }
         if let Some(hotkey) = &hotkey {
-            let tx = tx.clone();
+            let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
             hotkey.listen(move || {
-                let _ = tx.send(AppMsg::ToggleVisibility);
-                ctx.request_repaint();
+                crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
             });
         }
 
@@ -304,12 +284,14 @@ impl LiteApp {
 
         let mut app = Self {
             base_dir: base_dir.clone(),
+            pending_installs: crate::deep_link::PendingInstalls::start(&base_dir, &cc.egui_ctx),
             themes_dir,
             fonts_dir,
             plugin_dir,
             config,
             tx,
             rx,
+            control_rx,
             stats,
             ws_stats,
             stats_tx,
@@ -372,10 +354,14 @@ impl LiteApp {
         app.theme_options = theme::list_themes(&app.themes_dir);
         if start_hidden {
             winutil::set_main_window_invisible(true);
+            cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
         }
         app.plugin_mgr.shared.borrow_mut().is_gui_open = !start_hidden;
         app.refresh_statsapi();
         app.check_plugin_updates();
+        if crate::visibility::begin_change(&cc.egui_ctx, app.hidden) {
+            crate::visibility::applied(&cc.egui_ctx);
+        }
         app
     }
 
@@ -527,7 +513,7 @@ impl LiteApp {
     }
 
     fn handle_messages(&mut self, ctx: &egui::Context) {
-        while let Ok(message) = self.rx.try_recv() {
+        for message in crate::ui_work::priority_messages(&self.control_rx, &self.rx, ctx) {
             match message {
                 AppMsg::Log(line) => self.console.write(line),
                 AppMsg::GameEvent(event) => self.handle_game_event(event),
@@ -582,10 +568,11 @@ impl LiteApp {
                 AppMsg::ToggleVisibility => {
                     self.handle_toggle_visibility(ctx);
                 }
-                AppMsg::TrayVisibility(hidden) => {
-                    self.set_hidden(ctx, hidden);
+                AppMsg::TrayToggleVisibility => {
+                    self.set_hidden(ctx, !self.hidden);
                 }
                 AppMsg::TrayQuit => {
+                    tracing::info!("handling tray quit on UI thread");
                     if self.update_info.is_none() {
                         self.force_quit();
                     }
@@ -850,7 +837,7 @@ impl LiteApp {
     }
 
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
-        let rocket_league_had_focus = !hidden && hebnix_sdk::process::is_rocket_league_focused();
+        if !crate::visibility::begin_change(ctx, hidden) { return; }
         if !hidden {
             winutil::note_foreground();
         }
@@ -873,13 +860,14 @@ impl LiteApp {
             // Show/Hide is an explicit request to surface Hebnix.  Do not
             // leave it behind Rocket League when the hotkey came from the
             // game, even if the game is fullscreen.
-            if rocket_league_had_focus || !winutil::foreground_window_is_ours() {
-                winutil::focus_main_window();
-            }
+            // The tray menu's helper window belongs to this process too.
+            // Always focus the actual main window for an explicit Show.
+            winutil::focus_main_window();
         }
 
         self.plugin_mgr.dispatch_gui_visibility(!hidden);
         ctx.request_repaint();
+        crate::visibility::applied(ctx);
     }
 
     fn handle_toggle_visibility(&mut self, ctx: &egui::Context) {
@@ -892,6 +880,7 @@ impl LiteApp {
             && !hebnix_focused
             && !rocket_league_focused
         {
+            crate::visibility::cancel_queued_toggle();
             return;
         }
 
@@ -1932,6 +1921,16 @@ impl LiteApp {
         let Some((&primary, secondary)) = actions.split_first() else {
             return;
         };
+        if let Some(p) = theme::presentation(ui.ctx()) {
+            let labels: Vec<String> = actions.iter().map(|action| action.label()).collect();
+            let selected = if matches!(p.layout.shell, theme::Shell::Sidebar | theme::Shell::Rail) {
+                p.sidebar_actions(ui, &labels)
+            } else { p.inline_actions(ui, &labels) };
+            if let Some(index) = selected {
+                self.execute_action_button_action(actions[index]);
+            }
+            return;
+        }
         if secondary.is_empty() {
             if ui.button(primary.label()).clicked() {
                 self.execute_action_button_action(primary);
@@ -2103,10 +2102,7 @@ impl LiteApp {
     }
 
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("lite_hebnix_settings_list")
-            .resizable(false)
-            .default_size(200.0)
-            .size_range(200.0..=320.0)
+        theme::secondary_navigation(ui, "lite_hebnix_settings_list")
             .show(ui, |ui| {
                 ui.selectable_value(
                     &mut self.hebnix_settings_tab,
@@ -2591,10 +2587,7 @@ impl LiteApp {
             .map(|(_, name)| name.clone())
             .unwrap_or_default();
 
-        egui::Panel::left("lite_plugin_settings_list")
-            .resizable(false)
-            .default_size(200.0)
-            .size_range(200.0..=320.0)
+        theme::secondary_navigation(ui, "lite_plugin_settings_list")
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("lite_plugin_settings_names")
@@ -3006,19 +2999,27 @@ impl Drop for LiteApp {
 }
 
 impl eframe::App for LiteApp {
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // eframe skips ui() while occluded, but controls must still run.
+        crate::visibility::poll(ctx);
+        self.handle_messages(ctx);
+    }
+
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        for plugin_id in crate::deep_link::take_pending_plugin_ids(&self.base_dir) {
-            self.download_plugin(&plugin_id);
+        crate::visibility::note_ui_frame(&ctx);
+        if let Some((plugins, themes)) = self.pending_installs.take() {
+            for plugin_id in plugins {
+                self.download_plugin(&plugin_id);
+            }
+            for theme_id in themes {
+                self.download_theme(&theme_id);
+            }
         }
-        for theme_id in crate::deep_link::take_pending_theme_ids(&self.base_dir) {
-            self.download_theme(&theme_id);
-        }
-        self.handle_messages(&ctx);
         dpi_fix::install_on_all_windows();
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             self.last_size = (rect.width().max(0.0) as u32, rect.height().max(0.0) as u32);
@@ -3049,6 +3050,46 @@ impl eframe::App for LiteApp {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
+        if let Some(p) = theme::presentation(&ctx) {
+            if !self.hidden {
+                theme::show_shell(ui, &p, |ui, part| match part {
+                    theme::ShellPart::Navigation(vertical) => {
+                        if vertical {
+                            theme::sidebar(ui, |ui, part| match part {
+                                theme::SidebarPart::Footer => {
+                                    self.render_action_button(ui);
+                                    ui.add_space(6.0);
+                                    ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
+                                        .small().color(self.status_color)).wrap());
+                                }
+                                theme::SidebarPart::Pages => {
+                                    ui.heading("Hebnix");
+                                    egui::ScrollArea::vertical().id_salt("theme_nav_scroll")
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| self.render_themed_navigation(ui, &p, true));
+                                }
+                            });
+                        } else {
+                            theme::toolbar(ui, |ui| {
+                                self.render_themed_navigation(ui, &p, false);
+                                ui.add_space(8.0);
+                                p.toolbar_actions(ui, |ui| {
+                                    self.render_action_button(ui);
+                                    ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
+                                        .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
+                                });
+                            });
+                        }
+                    }
+                    theme::ShellPart::Content => match self.tab {
+                        Tab::Console => self.render_console(ui),
+                        Tab::Plugins => self.render_plugins(ui),
+                        Tab::Settings => self.render_settings(ui),
+                        Tab::About => self.render_about(ui),
+                    }
+                });
+            }
+        } else {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 for tab in [Tab::Console, Tab::Settings, Tab::Plugins, Tab::About] {
@@ -3075,6 +3116,7 @@ impl eframe::App for LiteApp {
                 }
             }
         });
+        }
         let plugin_tick_interval = if self.last_rl_open {
             Duration::from_millis(50)
         } else {
@@ -3147,4 +3189,14 @@ fn download_and_extract_plugin(id: &str, plugin_dir: &std::path::Path) -> Result
     let result = install_zip(&archive, plugin_dir);
     let _ = std::fs::remove_file(&archive);
     result
+}
+
+impl LiteApp {
+    fn render_themed_navigation(&mut self, ui: &mut egui::Ui, p: &theme::Presentation, vertical: bool) {
+        for (key, _) in p.ordered_pages(&[("Console", "Console"), ("Settings", "Settings"), ("Plugins", "Plugins"), ("About", "About")]) {
+            let tab = match key { "Settings" => Tab::Settings, "Plugins" => Tab::Plugins, "About" => Tab::About, _ => Tab::Console };
+            let width = vertical.then(|| ui.available_width());
+            if p.nav_item(ui, self.tab == tab, key, &tab.label(), width).clicked() { self.tab = tab; }
+        }
+    }
 }

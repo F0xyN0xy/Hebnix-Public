@@ -1,192 +1,132 @@
-//! Cleanup-only recovery survives power loss, updates, and a moved Hebnix exe.
-//! SYSTEM runs only a fixed script through Windows' own PowerShell; it never
-//! executes the user's Hebnix binary or a script from a writable directory.
+//! Retire the old WebSocket recovery tasks without running their hosts cleanup.
+use std::path::{Path, PathBuf};
 
-use base64::Engine;
-use std::path::Path;
-
-const BOOT_TASK: &str = "Hebnix Epic Connection Recovery";
-const OWNER_KEY: &str = r"SOFTWARE\Hebnix\ProxyRecovery";
-const OWNER_GUARD: &str = r#"
-$state = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Hebnix\ProxyRecovery' -ErrorAction SilentlyContinue
-if ($state.OwnerPid -and $state.OwnerStarted) {
-    $owner = Get-Process -Id $state.OwnerPid -ErrorAction SilentlyContinue
-    if ($owner -and $owner.StartTime.ToFileTimeUtc() -eq $state.OwnerStarted) { exit 0 }
-}
-"#;
-
-pub fn session_marker(base_dir: &Path) -> std::path::PathBuf {
-    base_dir.join("state").join("proxy_session.dirty")
-}
-const HOSTS_CLEANUP: &str = r#"
-$ErrorActionPreference = 'Stop'
-$mutex = New-Object System.Threading.Mutex($false, 'Global\HebnixHostsCleanup')
-try {
-    try { $locked = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
-    if (-not $locked) { throw 'Hosts cleanup lock timed out' }
-    # CHECK_LIVE_OWNER
-    $path = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-    $text = [IO.File]::ReadAllText($path)
-    $pattern = '(?im)^[\t ]*127\.0\.0\.1[\t ]+[^#\r\n]+#[\t ]*hebnix(?: spoofer)?[\t ]*(?:\r?\n|$)'
-    $clean = [regex]::Replace($text, $pattern, '')
-    if ($clean -cne $text) {
-        $temporary = Join-Path ([IO.Path]::GetDirectoryName($path)) ('.hebnix-hosts-' + [Guid]::NewGuid().ToString() + '.tmp')
-        try {
-            [IO.File]::WriteAllText($temporary, $clean, (New-Object Text.UTF8Encoding($false)))
-            [IO.File]::Replace($temporary, $path, [NullString]::Value)
-        } finally {
-            if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-        }
-        & "$env:SystemRoot\System32\ipconfig.exe" /flushdns | Out-Null
-    }
-} finally {
-    if ($locked) { $mutex.ReleaseMutex() }
-    $mutex.Dispose()
-}
-"#;
-
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+pub fn session_marker(base_dir: &Path) -> PathBuf {
+    base_dir.join("state/proxy_session.dirty")
 }
 
-fn encoded_command(script: &str) -> String {
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn task_xml(trigger: &str, principal: &str, script: &str) -> String {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let powershell =
-        Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    format!(
-        r#"<?xml version="1.0"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
- <RegistrationInfo><Description>Restore Epic connectivity after an interrupted Hebnix proxy session. Cleanup only.</Description></RegistrationInfo>
- <Triggers>{trigger}</Triggers>
- <Principals><Principal id="Recovery">{principal}<RunLevel>HighestAvailable</RunLevel></Principal></Principals>
- <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT2M</ExecutionTimeLimit></Settings>
- <Actions Context="Recovery"><Exec><Command>{}</Command><Arguments>-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}</Arguments></Exec></Actions>
-</Task>"#,
-        xml_escape(&powershell.to_string_lossy()),
-        encoded_command(script)
-    )
-}
-
-fn cache_cleanup(base_dir: &Path) -> String {
-    let marker = session_marker(base_dir)
-        .to_string_lossy()
-        .replace('\'', "''");
-    format!(
+pub fn uninstall_legacy() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let user = format!(
+        "{}-{}",
+        std::env::var("USERDOMAIN").map_err(|e| e.to_string())?,
+        std::env::var("USERNAME").map_err(|e| e.to_string())?
+    );
+    let cache_task = format!("Hebnix Epic Cache Recovery {user}").replace('\'', "''");
+    let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
-$marker = '{marker}'
-if (-not (Test-Path -LiteralPath $marker)) {{ exit 0 }}
-if (Get-Process -Name RocketLeague -ErrorAction SilentlyContinue) {{ exit 0 }}
-$documents = [Environment]::GetFolderPath('MyDocuments')
-if (-not [IO.Path]::IsPathRooted($documents)) {{ throw 'Documents folder unavailable' }}
-$cache = Join-Path $documents 'My Games\Rocket League\TAGame\Cache\WebCache'
-if (Test-Path -LiteralPath $cache) {{ Remove-Item -LiteralPath $cache -Recurse -Force }}
-Remove-Item -LiteralPath $marker -Force
+$names = @('Hebnix Epic Connection Recovery', '{cache_task}')
+$tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {{ $_.TaskPath -eq '\' -and $_.TaskName -in $names }})
+foreach ($task in $tasks) {{
+    Stop-ScheduledTask -InputObject $task -ErrorAction Stop
+    Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop
+}}
 "#
-    )
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not retire legacy proxy recovery tasks: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
-fn register(name: &str, xml: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    let path = std::env::temp_dir().join(format!(
-        "hebnix-recovery-{}-{}.xml",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    std::fs::write(&path, xml)
-        .map_err(|e| format!("Could not prepare connection recovery: {e}"))?;
-    let result = std::process::Command::new("schtasks.exe")
-        .args(["/Create", "/TN", name, "/XML"])
-        .arg(&path)
-        .arg("/F")
-        .creation_flags(0x08000000)
-        .output();
-    let _ = std::fs::remove_file(&path);
-    let output = result.map_err(|e| format!("Could not register connection recovery: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Windows could not enable connection recovery: {} {}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+/// A durable migration, retried on the next launch if cleanup cannot finish.
+/// Shared certificates are retained for HTTP. The hosts file is never touched.
+pub fn cleanup_websocket_once(base_dir: &Path) -> Result<(), String> {
+    run_cleanup_once(base_dir, || cleanup_legacy_state(base_dir))
+}
+
+fn run_cleanup_once(
+    base_dir: &Path,
+    cleanup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let complete = base_dir.join("state/websocket_cleanup_2.2.6.done");
+    if complete.is_file() {
+        return Ok(());
+    }
+    cleanup()?;
+    std::fs::create_dir_all(complete.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(
+        complete,
+        b"WebSocket bypass retired; hosts file left untouched",
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn cleanup_legacy_state(base_dir: &Path) -> Result<(), String> {
+    crate::recovery_tasks::uninstall_legacy()?;
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err(
+            "WebSocket cache cleanup will run at the next Hebnix start with Rocket League closed."
+                .into(),
+        );
+    }
+    crate::winutil::clear_rocket_league_web_cache().map_err(|e| e.to_string())?;
+    for path in [
+        session_marker(base_dir),
+        base_dir.join("rank_spoofer_frames.log"),
+    ] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
     }
     Ok(())
 }
 
-pub fn install(base_dir: &Path) -> Result<(), String> {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-    let mut created = FILETIME::default();
-    let mut exited = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user_time = FILETIME::default();
-    unsafe {
-        GetProcessTimes(
-            GetCurrentProcess(),
-            &mut created,
-            &mut exited,
-            &mut kernel,
-            &mut user_time,
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "hebnix-websocket-retirement-{}",
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
     }
-    .map_err(|e| format!("Could not identify the proxy owner: {e}"))?;
-    let started = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-    // Publish numeric identity under the hosts lock. A recovery task launched
-    // by a previous Hebnix must see the replacement owner after acquiring the
-    // lock. Nothing in this registry key is ever executed by SYSTEM.
-    {
-        let _guard = crate::hosts_file::HostsLock::acquire()?;
-        let (key, _) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-            .create_subkey(OWNER_KEY)
-            .map_err(|e| format!("Could not publish proxy recovery owner: {e}"))?;
-        key.set_value("OwnerPid", &std::process::id())
-            .map_err(|e| e.to_string())?;
-        key.set_value("OwnerStarted", &started)
-            .map_err(|e| e.to_string())?;
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
-    register(
-        BOOT_TASK,
-        &task_xml(
-            "<BootTrigger><Enabled>true</Enabled></BootTrigger>",
-            "<UserId>S-1-5-18</UserId>",
-            &HOSTS_CLEANUP.replace("# CHECK_LIVE_OWNER", OWNER_GUARD),
-        ),
-    )?;
-    let user = format!(
-        "{}\\{}",
-        std::env::var("USERDOMAIN").map_err(|e| e.to_string())?,
-        std::env::var("USERNAME").map_err(|e| e.to_string())?
-    );
-    let escaped = xml_escape(&user);
-    let trigger = format!(
-        "<LogonTrigger><Enabled>true</Enabled><UserId>{escaped}</UserId></LogonTrigger>"
-    );
-    // WindowStyle Hidden takes effect inside PowerShell; running in the
-    // user's interactive desktop can still flash a console during startup.
-    // S4U uses a separate non-interactive desktop without storing a password.
-    let principal = cache_principal(&escaped);
-    // Separate per-user cache recovery from system-wide hosts recovery.
-    let task_user = user.replace('\\', "-");
-    register(
-        &format!("Hebnix Epic Cache Recovery {task_user}"),
-        &task_xml(
-            &trigger,
-            &principal,
-            &format!("{OWNER_GUARD}{}", cache_cleanup(base_dir)),
-        ),
-    )
-}
-
-fn cache_principal(escaped_user: &str) -> String {
-    format!("<UserId>{escaped_user}</UserId><LogonType>S4U</LogonType>")
+    #[test]
+    fn completed_migration_never_runs_cleanup_again() {
+        let base = TempDir::new();
+        run_cleanup_once(&base.0, || Ok(())).unwrap();
+        run_cleanup_once(&base.0, || panic!("cleanup repeated")).unwrap();
+    }
+    #[test]
+    fn failed_migration_can_retry_without_losing_saved_preferences() {
+        let base = TempDir::new();
+        let preferences = base.0.join("spoofer_settings.json");
+        std::fs::write(&preferences, b"saved names and titles").unwrap();
+        assert!(run_cleanup_once(&base.0, || Err("cache locked".into())).is_err());
+        assert!(!base.0.join("state/websocket_cleanup_2.2.6.done").exists());
+        run_cleanup_once(&base.0, || Ok(())).unwrap();
+        assert_eq!(
+            std::fs::read(preferences).unwrap(),
+            b"saved names and titles"
+        );
+    }
 }

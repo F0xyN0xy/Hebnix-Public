@@ -9,6 +9,62 @@ use crate::save_file::crypto::{OBJHEADER, is_type_tag};
 
 type PResult<T> = Result<T, String>;
 
+#[cfg(test)]
+mod string_tests {
+    use super::*;
+
+    fn narrow(bytes: &[u8]) -> Vec<u8> {
+        let mut data = ((bytes.len() + 1) as i32).to_le_bytes().to_vec();
+        data.extend_from_slice(bytes);
+        data.push(0);
+        data
+    }
+
+    #[test]
+    fn narrow_strings_accept_single_byte_text_and_existing_utf8() {
+        for (bytes, expected) in [
+            (b"Gr\xfc\xdfe".as_slice(), "Grüße"),
+            ("Grüße".as_bytes(), "Grüße"),
+            (b"None".as_slice(), "None"),
+            (b"".as_slice(), ""),
+        ] {
+            let data = narrow(bytes);
+            assert_eq!(read_ue3(&data, 0).unwrap(), (expected.into(), data.len()));
+        }
+    }
+
+    #[test]
+    fn narrow_strings_require_the_declared_length_and_terminator() {
+        assert!(read_ue3(&[2, 0, 0, 0, b'x'], 0).is_err());
+        assert!(read_ue3(&[2, 0, 0, 0, b'x', b'y'], 0).is_err());
+    }
+
+    #[test]
+    fn utf16_strings_remain_supported() {
+        let text = "日本語";
+        let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        let mut data = (-(units.len() as i32)).to_le_bytes().to_vec();
+        for unit in units {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(read_ue3(&data, 0).unwrap(), (text.into(), data.len()));
+    }
+
+    #[test]
+    fn single_byte_property_values_do_not_abort_the_object() {
+        let value = narrow(b"Gr\xfc\xdfe");
+        let mut data = narrow(b"Description");
+        data.extend_from_slice(&narrow(b"StrProperty"));
+        data.extend_from_slice(&(value.len() as i32).to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&value);
+        data.extend_from_slice(&narrow(b"None"));
+        let (properties, end) = parse_property_stream(&data, 0).unwrap();
+        assert_eq!(properties["Description"], "Grüße");
+        assert_eq!(end, data.len());
+    }
+}
+
 fn read_i32(data: &[u8], offset: usize) -> PResult<i32> {
     let bytes = data
         .get(offset..offset + 4)
@@ -41,8 +97,8 @@ fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
 }
 
-/// read a ue3 length-prefixed string. positive len = utf-8 (len includes the
-/// null terminator), negative len = utf-16-le (2 bytes per char).
+/// Read a UE3 length-prefixed string. Positive lengths contain narrow text
+/// including a null terminator; negative lengths contain UTF-16LE code units.
 pub fn read_ue3(data: &[u8], offset: usize) -> PResult<(String, usize)> {
     let length = read_i32(data, offset)?;
     let offset = offset + 4;
@@ -65,12 +121,17 @@ pub fn read_ue3(data: &[u8], offset: usize) -> PResult<(String, usize)> {
         return Ok((s, offset + byte_count));
     }
     let len = length as usize;
-    let raw = data
-        .get(offset..offset + len - 1)
-        .ok_or_else(|| format!("utf8 string out of range at {offset}"))?;
+    let terminated = data
+        .get(offset..offset + len)
+        .ok_or_else(|| format!("narrow string out of range at {offset}"))?;
+    let Some((&0, raw)) = terminated.split_last() else {
+        return Err(format!("unterminated narrow string at {offset}"));
+    };
+    // Existing tools also write UTF-8 in narrow strings. Preserve that support,
+    // while accepting the single-byte characters found in game-written saves.
     let s = std::str::from_utf8(raw)
-        .map_err(|e| format!("utf8 decode: {e}"))?
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|_| raw.iter().map(|&byte| char::from(byte)).collect());
     Ok((s, offset + len))
 }
 

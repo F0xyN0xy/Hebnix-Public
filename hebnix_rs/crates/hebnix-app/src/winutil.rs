@@ -11,9 +11,9 @@ use raw_window_handle::{
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
-use windows::Win32::UI::Shell::{DefSubclassProc, ITaskbarList, SetWindowSubclass, TaskbarList};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST,
     IsIconic, IsWindow, IsWindowVisible, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -38,27 +38,10 @@ pub fn acquire_single_instance() -> Option<HANDLE> {
     }
 }
 
-fn find_hebnix_window(own_process_only: bool) -> Option<HWND> {
-    unsafe {
-        let name = wide("Hebnix");
-        let hwnd = FindWindowW(None, PCWSTR(name.as_ptr())).ok()?;
-        if hwnd.is_invalid() {
-            return None;
-        }
-        if own_process_only {
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid != GetCurrentProcessId() {
-                return None;
-            }
-        }
-        Some(hwnd)
-    }
-}
-
-/// our main window's HWND (this process only), if it exists yet
+/// Our main window, registered from eframe rather than searched by title.
+/// FindWindowW can wait on same-process windows on other threads.
 pub fn main_window_hwnd() -> Option<HWND> {
-    find_hebnix_window(true)
+    crate::window_state::main_window()
 }
 
 /// Pin/unpin the main window over everything (incl. the game) without
@@ -67,7 +50,7 @@ pub fn main_window_hwnd() -> Option<HWND> {
 pub fn set_main_window_topmost(topmost: bool) {
     let topmost =
         topmost && (foreground_window_is_ours() || hebnix_sdk::process::is_rocket_league_focused());
-    if let Some(hwnd) = find_hebnix_window(true) {
+    if let Some(hwnd) = main_window_hwnd() {
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
@@ -143,13 +126,13 @@ impl HasDisplayHandle for DialogParent {
 }
 
 pub fn parent_file_dialog(dialog: rfd::FileDialog) -> rfd::FileDialog {
-    find_hebnix_window(true)
+    main_window_hwnd()
         .map(|hwnd| dialog.clone().set_parent(&DialogParent(hwnd)))
         .unwrap_or(dialog)
 }
 
 pub fn parent_message_dialog(dialog: rfd::MessageDialog) -> rfd::MessageDialog {
-    find_hebnix_window(true)
+    main_window_hwnd()
         .map(|hwnd| dialog.clone().set_parent(&DialogParent(hwnd)))
         .unwrap_or(dialog)
 }
@@ -202,7 +185,7 @@ pub fn restore_foreground() -> bool {
 }
 
 pub fn focus_main_window() -> bool {
-    match find_hebnix_window(true) {
+    match main_window_hwnd() {
         Some(hwnd) => focus_window(hwnd),
         None => false,
     }
@@ -689,45 +672,13 @@ fn clear_epic_multihome() -> Result<(), String> {
     Ok(())
 }
 
-thread_local! {
-    // com object, not Send
-    static TASKBAR: std::cell::RefCell<Option<ITaskbarList>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn set_taskbar_button(hwnd: HWND, shown: bool) {
-    TASKBAR.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            let list = unsafe {
-                CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok()
-            };
-            if let Some(list) = &list {
-                unsafe {
-                    let _ = list.HrInit();
-                }
-            }
-            *slot = list;
-        }
-        if let Some(list) = slot.as_ref() {
-            unsafe {
-                let _ = if shown {
-                    list.AddTab(hwnd)
-                } else {
-                    list.DeleteTab(hwnd)
-                };
-            }
-        }
-    });
-}
-
 /// hide by dropping the os alpha to 0. SW_HIDE crashes wgpu and takes the
 /// plugin child windows with it. an alpha 0 window is still a normal one to the
 /// os though, so NOACTIVATE stops it being handed the foreground when whatever
 /// sat on top goes away, and TOOLWINDOW drops it from alt-tab.
 pub fn set_main_window_invisible(invisible: bool) {
     MAIN_HIDDEN.store(invisible, Ordering::Relaxed);
-    if let Some(hwnd) = find_hebnix_window(true) {
+    if let Some(hwnd) = main_window_hwnd() {
         unsafe {
             use windows::Win32::Foundation::COLORREF;
             use windows::Win32::UI::WindowsAndMessaging::{
@@ -739,21 +690,13 @@ pub fn set_main_window_invisible(invisible: bool) {
             if invisible {
                 SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32 | away);
                 let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
-                set_taskbar_button(hwnd, false);
             } else {
                 SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & !away);
                 let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-                set_taskbar_button(hwnd, true);
+                if !IsWindowVisible(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
             }
-        }
-    }
-}
-
-pub fn show_main_window_from_tray() {
-    set_main_window_invisible(false);
-    if let Some(hwnd) = find_hebnix_window(true) {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOW);
         }
     }
 }
