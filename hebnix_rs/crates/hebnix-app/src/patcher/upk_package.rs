@@ -1,12 +1,12 @@
 use aes::Aes256;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::patcher::patch_core::upk;
 
 const UPK_MAGIC: u32 = 0x9E2A83C1;
-const MAX_LOGICAL_SIZE: usize = 512 * 1024 * 1024;
+const MAX_LOGICAL_SIZE: usize = upk::MAX_CHUNK_SIZE as usize;
 
 #[derive(Clone, Debug)]
 struct Header {
@@ -92,6 +92,10 @@ pub struct UpkPackage {
     modified_chunks: HashSet<usize>,
     header_dirty: bool,
     raw_dirty: bool,
+    // Original slot capacities survive the restore-then-repatch staging pass.
+    // Only pointer-free title movies opt into this; bulk-data relocations keep
+    // their existing append/rebase behavior.
+    title_capacities: HashMap<usize, (usize, usize)>,
 }
 
 struct Cursor<'a> {
@@ -605,6 +609,7 @@ impl UpkPackage {
             modified_chunks: HashSet::new(),
             header_dirty: false,
             raw_dirty: false,
+            title_capacities: HashMap::new(),
         })
     }
 
@@ -661,6 +666,48 @@ impl UpkPackage {
         }
         parts.reverse();
         parts.join(".")
+    }
+
+    pub fn asset_path(&self, index: i32) -> String {
+        self.object_path(index)
+            .split('.')
+            .map(strip)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    pub fn find_object(&self, path: &str) -> Option<i32> {
+        (1..=self.exports.len() as i32)
+            .chain((1..=self.imports.len() as i32).map(|i| -i))
+            .find(|index| self.asset_path(*index).eq_ignore_ascii_case(path))
+    }
+
+    pub fn reference_class(&self, index: i32) -> Result<(String, String), String> {
+        let import = if index < 0 {
+            self.imports
+                .get((-index - 1) as usize)
+                .ok_or("Invalid object import")?
+        } else {
+            let export = self
+                .exports
+                .get((index - 1) as usize)
+                .ok_or("Invalid object export")?;
+            if export.class_index >= 0 {
+                return Err("Unsupported locally defined object class".into());
+            }
+            let class = self
+                .imports
+                .get((-export.class_index - 1) as usize)
+                .ok_or("Invalid class import")?;
+            return Ok((
+                self.asset_path(class.outer_index),
+                strip(&self.name_of(class.object_name)).to_string(),
+            ));
+        };
+        Ok((
+            strip(&self.name_of(import.class_package)).to_string(),
+            strip(&self.name_of(import.class_name)).to_string(),
+        ))
     }
 
     pub fn import_debug(&self) -> Vec<(String, String, String)> {
@@ -1125,6 +1172,49 @@ impl UpkPackage {
         self.patch(offset, &value.to_le_bytes())
     }
 
+    /// Replace a title movie without appending it again when its existing slot
+    /// fits. A baseline restore can shrink the serialized length while retaining
+    /// capacity for the subsequent patch in the same staging transaction.
+    pub(crate) fn replace_title_export(
+        &mut self,
+        index: usize,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if self.header.file_version != 868 || self.header.licensee_version < 22 {
+            return Err("Title replacement requires the inspected Rocket League format".into());
+        }
+        let export = self
+            .exports
+            .get(index)
+            .ok_or("Invalid title export index")?
+            .clone();
+        if !matches!(strip(&self.class_of(&export)), "SwfMovie" | "GFxMovieInfo") {
+            return Err("In-place title replacement requires a pointer-free movie export".into());
+        }
+        if bytes.is_empty() || bytes.len() > i32::MAX as usize {
+            return Err("Invalid title export size".into());
+        }
+        let capacity = self
+            .title_capacities
+            .get(&index)
+            .filter(|(offset, _)| *offset == export.serial_offset)
+            .map(|(_, size)| *size)
+            .unwrap_or(export.serial_size);
+        if bytes.len() <= capacity {
+            self.patch(export.serial_offset, bytes)?;
+            self.patch_i32(export.entry_offset + 32, bytes.len() as i32)?;
+            self.exports[index].serial_size = bytes.len();
+            self.title_capacities
+                .insert(index, (export.serial_offset, capacity));
+            Ok(())
+        } else {
+            self.replace_export_payload(index, bytes)?;
+            self.title_capacities
+                .insert(index, (self.exports[index].serial_offset, bytes.len()));
+            Ok(())
+        }
+    }
+
     /// Relocate a caller-validated pointer-free export payload to the logical end.
     /// The caller must rebase any absolute bulk-data pointers before using this.
     pub(crate) fn replace_export_payload(
@@ -1184,6 +1274,12 @@ impl UpkPackage {
         std::fs::write(path, self.repacked()?)
             .map_err(|e| format!("Could not write {}: {e}", path.display()))
     }
+    /// Same package framing/encryption with faster zlib compression. Intended
+    /// for verified title staging, where latency matters more than file size.
+    pub(crate) fn save_fast(&self, path: &Path) -> Result<(), String> {
+        std::fs::write(path, self.repacked_with_compression(1)?)
+            .map_err(|e| format!("Could not write {}: {e}", path.display()))
+    }
     /// Duplicate a validated local template into a stripped export slot.
     /// Used only by the offline experiment; existing exports stay in place.
     pub fn clone_into_empty_export(&mut self, template: usize) -> Result<usize, String> {
@@ -1229,6 +1325,9 @@ impl UpkPackage {
         Ok(slot)
     }
     pub(crate) fn repacked(&self) -> Result<Vec<u8>, String> {
+        self.repacked_with_compression(9)
+    }
+    fn repacked_with_compression(&self, compression: u32) -> Result<Vec<u8>, String> {
         if self.chunks.is_empty() && (self.raw_dirty || self.header_dirty) {
             let mut output = self.image.clone();
             if self.header_dirty && self.key != [0; 32] {
@@ -1275,7 +1374,7 @@ impl UpkPackage {
                     .image
                     .get(c.uncompressed_offset..c.uncompressed_offset + span)
                     .ok_or("Logical chunk outside image")?;
-                let packed = pack_chunk(payload, c.block_size)?;
+                let packed = pack_chunk(payload, c.block_size, compression)?;
                 let packed = if self.header.package_flags & 0x0800 != 0 {
                     crypt_ctr(
                         &packed,
@@ -1319,14 +1418,17 @@ impl UpkPackage {
     }
 }
 
-fn pack_chunk(payload: &[u8], block_size: usize) -> Result<Vec<u8>, String> {
+fn pack_chunk(payload: &[u8], block_size: usize, compression: u32) -> Result<Vec<u8>, String> {
     if payload.is_empty() {
         return Err("Cannot compress empty chunk".into());
     }
     let bs = if block_size == 0 { 131072 } else { block_size };
     let mut blocks = Vec::new();
     for block in payload.chunks(bs) {
-        blocks.push(upk::zlib_compress(block, 9).map_err(|e| format!("Compression failed: {e:?}"))?)
+        blocks.push(
+            upk::zlib_compress(block, compression)
+                .map_err(|e| format!("Compression failed: {e:?}"))?,
+        )
     }
     let compressed: usize = blocks.iter().map(Vec::len).sum();
     let header_len = 16 + blocks.len() * 8;
@@ -1347,4 +1449,56 @@ fn pack_chunk(payload: &[u8], block_size: usize) -> Result<Vec<u8>, String> {
 
 pub fn strip(name: &str) -> &str {
     name.strip_suffix("_-2").unwrap_or(name)
+}
+
+#[cfg(test)]
+mod title_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn title_chunk_larger_than_legacy_50_mb_limit_round_trips() {
+        let original = vec![0x5a; 50_000_001];
+        let encoded = pack_chunk(&original, 131072, 1).unwrap();
+        let (decoded, block_size, end) = upk::decomp_chunk_at(&encoded, 0).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(block_size, 131072);
+        assert_eq!(end, encoded.len());
+    }
+
+    #[test]
+    fn title_chunk_rejects_oversized_and_inconsistent_blocks() {
+        let mut encoded = pack_chunk(&[0x5a; 100], 131072, 1).unwrap();
+        upk::write_u32(&mut encoded, 12, upk::MAX_CHUNK_SIZE + 1);
+        assert!(matches!(
+            upk::decomp_chunk_at(&encoded, 0),
+            Err(upk::UpkError::OversizedChunk)
+        ));
+        let mut encoded = pack_chunk(&[0x5a; 100], 131072, 1).unwrap();
+        upk::write_u32(&mut encoded, 20, 99);
+        assert!(matches!(
+            upk::decomp_chunk_at(&encoded, 0),
+            Err(upk::UpkError::InvalidBlockSize)
+        ));
+        // Internally consistent metadata must still not allow a compressed
+        // stream to inflate past its claimed size.
+        let mut encoded = pack_chunk(&[0x5a; 100], 131072, 1).unwrap();
+        upk::write_u32(&mut encoded, 12, 16);
+        upk::write_u32(&mut encoded, 20, 16);
+        assert!(matches!(
+            upk::decomp_chunk_at(&encoded, 0),
+            Err(upk::UpkError::DecompressionFailed)
+        ));
+    }
+
+    #[test]
+    fn title_chunk_accepts_padded_streams_and_rejects_overflowing_offsets() {
+        let encoded = upk::recomp_chunk_safely_padded(&[0x5a; 100], 131072, Some(256)).unwrap();
+        let (decoded, _, end) = upk::decomp_chunk_at(&encoded, 0).unwrap();
+        assert_eq!(decoded, vec![0x5a; 100]);
+        assert_eq!(end, 256);
+        assert!(matches!(
+            upk::decomp_chunk_at(&encoded, usize::MAX),
+            Err(upk::UpkError::OutOfBounds)
+        ));
+    }
 }

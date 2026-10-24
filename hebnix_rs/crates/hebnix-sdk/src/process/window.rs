@@ -5,9 +5,10 @@
 //! hooks inject those everywhere), and OpenProcess on the game is unreliable
 //! once eac locks it. GetWindowThreadProcessId dodges both.
 
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Duration;
 
+use crate::background_cache::BackgroundCache;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -15,30 +16,30 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, IsWindowVisible,
 };
 
-/// cached RL pid, the process scan costs a few ms and the focus helpers run
-/// twice a second.
+/// Focus checks run on every UI frame and on the monitor thread. Neither may
+/// wait for a process scan, including when the cache expires or is first used.
 fn cached_rl_pid() -> Option<u32> {
-    static CACHE: Mutex<Option<(Instant, Option<u32>)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap();
-    if let Some((ts, pid)) = *cache {
-        if ts.elapsed() < Duration::from_secs(3) {
-            return pid;
-        }
-    }
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let pid = sys
-        .processes()
-        .iter()
-        .find(|(_, p)| {
-            p.name()
-                .to_string_lossy()
-                .to_lowercase()
-                .contains("rocketleague")
+    static CACHE: OnceLock<BackgroundCache<Option<u32>>> = OnceLock::new();
+    *CACHE
+        .get_or_init(|| {
+            let mut sys = System::new();
+            BackgroundCache::new("rl-focus", None, Duration::from_millis(500), move |_| {
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing(),
+                );
+                Some(sys.processes().iter().find_map(|(pid, process)| {
+                    process
+                        .name()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("rocketleague")
+                        .then_some(pid.as_u32())
+                }))
+            })
         })
-        .map(|(pid, _)| pid.as_u32());
-    *cache = Some((Instant::now(), pid));
-    pid
+        .snapshot()
 }
 
 fn window_pid(hwnd: HWND) -> u32 {

@@ -6,6 +6,43 @@ const PLUGIN_PREFIX: &str = "hebnix://install/plugin/";
 const THEME_PREFIX: &str = "hebnix://install/theme/";
 const MAX_THEME_DOWNLOAD: u64 = 50 * 1024 * 1024;
 
+/// Filesystem polling belongs to a worker, never to egui's per-frame callback.
+pub struct PendingInstalls {
+    batches: crossbeam_channel::Receiver<(Vec<String>, Vec<String>)>,
+    _stop: std::sync::mpsc::Sender<()>,
+}
+
+impl PendingInstalls {
+    pub fn start(base_dir: &Path, ctx: &eframe::egui::Context) -> Self {
+        let base_dir = base_dir.to_path_buf();
+        let ctx = ctx.clone();
+        let (tx, batches) = crossbeam_channel::unbounded();
+        let (stop, stopped) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("install-links".into())
+            .spawn(move || loop {
+                let plugins = take_pending_plugin_ids(&base_dir);
+                let themes = take_pending_theme_ids(&base_dir);
+                if !plugins.is_empty() || !themes.is_empty() {
+                    if tx.send((plugins, themes)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+                match stopped.recv_timeout(Duration::from_millis(500)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            })
+            .expect("failed to spawn install link worker");
+        Self { batches, _stop: stop }
+    }
+
+    pub fn take(&self) -> Option<(Vec<String>, Vec<String>)> {
+        self.batches.try_recv().ok()
+    }
+}
+
 pub fn register_and_queue_from_args(base_dir: &Path) {
     if let Err(error) = register_protocol() {
         tracing::warn!("failed to register hebnix:// protocol: {error}");
@@ -208,6 +245,7 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
     let mut archive = zip::ZipArchive::new(reader).map_err(|error| error.to_string())?;
     let mut files = Vec::new();
     let mut theme_count = 0;
+    let mut total_bytes = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
         if entry.is_dir() || entry.size() > MAX_THEME_DOWNLOAD {
@@ -223,10 +261,18 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or("");
-        let destination = if extension.eq_ignore_ascii_case("toml") {
+        let asset_destination = if path.starts_with("assets") && matches!(extension, "png" | "jpg" | "jpeg" | "webp") {
+            let asset = path.to_string_lossy().replace('\\', "/");
+            crate::theme::validate_asset_path(&asset)?;
+            Some(themes_dir.join(&path))
+        } else { None };
+        let destination = if asset_destination.is_some() {
+            themes_dir
+        } else if extension.eq_ignore_ascii_case("toml") {
             theme_count += 1;
             themes_dir
-        } else if extension.eq_ignore_ascii_case("ttf") || extension.eq_ignore_ascii_case("otf") {
+        } else if extension.eq_ignore_ascii_case("ttf") || extension.eq_ignore_ascii_case("otf")
+            || (extension.eq_ignore_ascii_case("txt") && filename.ends_with("-OFL.txt")) {
             fonts_dir
         } else {
             continue;
@@ -237,6 +283,8 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
             .take(MAX_THEME_DOWNLOAD + 1)
             .read_to_end(&mut contents)
             .map_err(|error| error.to_string())?;
+        total_bytes += contents.len() as u64;
+        if total_bytes > MAX_THEME_DOWNLOAD { return Err("Expanded theme archive exceeds 50 MB".into()); }
         if contents.len() as u64 > MAX_THEME_DOWNLOAD {
             return Err(format!("Theme archive entry '{filename}' is too large"));
         }
@@ -244,14 +292,26 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
             validate_theme(&contents)?;
         }
         files.push((
-            destination.join(safe_filename(filename, extension)?),
+            asset_destination.unwrap_or(destination.join(safe_filename(filename, extension)?)),
             contents,
         ));
     }
     if theme_count == 0 {
         return Err("Theme archive does not contain a TOML theme file".to_string());
     }
+    for (path, contents) in &files {
+        if path.extension().is_some_and(|e| e == "toml") {
+            let text = std::str::from_utf8(contents).map_err(|e| e.to_string())?;
+            let theme = crate::theme::parse_theme(text)?;
+            if let Some(asset) = theme.assets.background {
+                if !files.iter().any(|(p,_)| *p == themes_dir.join(&asset)) {
+                    return Err(format!("Theme archive is missing background: {asset}"));
+                }
+            }
+        }
+    }
     for (path, contents) in files {
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
         std::fs::write(path, contents).map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -260,7 +320,7 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
 fn validate_theme(bytes: &[u8]) -> Result<(), String> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| "Theme TOML is not valid UTF-8".to_string())?;
-    toml::from_str::<crate::theme::ThemeFile>(text)
+    crate::theme::parse_theme(text)
         .map(|_| ())
         .map_err(|error| format!("Invalid theme TOML: {error}"))
 }
@@ -275,4 +335,64 @@ fn safe_filename<'a>(value: &'a str, expected_extension: &str) -> Result<&'a str
     (is_single_component && extension_matches)
         .then_some(value)
         .ok_or_else(|| format!("Unsafe theme filename '{value}'"))
+}
+
+#[cfg(test)]
+mod theme_archive_tests {
+    use super::*;
+
+    #[test]
+    fn install_worker_delivers_both_link_types_once_and_keeps_polling() {
+        let base = std::env::temp_dir()
+            .join(format!("hebnix-install-links-{}", rand::random::<u64>()));
+        queue_install(&base, "plugin", "plugin-one").unwrap();
+        queue_install(&base, "theme", "theme-one").unwrap();
+        queue_install(&base, "plugin", "invalid/link").unwrap();
+        let pending = PendingInstalls::start(&base, &eframe::egui::Context::default());
+        assert_eq!(
+            pending.batches.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (vec!["plugin-one".to_string()], vec!["theme-one".to_string()]),
+        );
+        assert!(pending.take().is_none());
+        queue_install(&base, "plugin", "plugin-two").unwrap();
+        assert_eq!(
+            pending.batches.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (vec!["plugin-two".to_string()], Vec::new()),
+        );
+        assert!(pending.take().is_none());
+        drop(pending);
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let resolved = base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved != temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
+
+    #[test]
+    fn builder_theme_zip_installs_and_loads_with_background() {
+        let base = std::env::temp_dir().join(format!("hebnix-theme-archive-{}",std::process::id()));
+        let themes = base.join("themes");
+        let fonts = base.join("fonts");
+        std::fs::create_dir_all(&themes).unwrap();
+        std::fs::create_dir_all(&fonts).unwrap();
+        for (bytes,name) in [
+            (include_bytes!("../../../examples/themes/packages/Carbon Studio.zip").as_slice(),"Carbon Studio"),
+            (include_bytes!("../../../examples/themes/packages/Ocean Workspace.zip").as_slice(),"Ocean Workspace"),
+            (include_bytes!("../../../examples/themes/packages/Crimson Arena.zip").as_slice(),"Crimson Arena"),
+            (include_bytes!("../../../examples/themes/packages/Ocean Studio Dark.zip").as_slice(),"Ocean Studio Dark"),
+            (include_bytes!("../../../examples/themes/packages/Hebnix 2.zip").as_slice(),"Hebnix 2"),
+            (include_bytes!("../testdata/theme-background.zip").as_slice(),"Test Background"),
+        ] {
+            install_theme_zip(bytes,&themes,&fonts).unwrap();
+            let ctx=eframe::egui::Context::default();
+            crate::theme::apply_theme(&ctx,&themes,&fonts,name).unwrap();
+            assert!(crate::theme::presentation(&ctx).is_some());
+        }
+        assert!(themes.join("assets/test/background.png").is_file());
+        assert!(fonts.join("Barlow-Medium.ttf").is_file());
+        assert!(std::fs::read_to_string(fonts.join("Barlow-Medium-OFL.txt")).unwrap().contains("SIL OPEN FONT LICENSE"));
+        let temp=std::env::temp_dir().canonicalize().unwrap();
+        let resolved=base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved!=temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
 }

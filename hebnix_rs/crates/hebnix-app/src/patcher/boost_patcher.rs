@@ -1010,66 +1010,150 @@ pub fn image_to_dxt5_with_alpha(img: &image::RgbaImage, width: usize, height: us
             let alpha_block = dxt5_alpha_block(&a);
             dxt5[out_idx..out_idx + 8].copy_from_slice(&alpha_block);
 
-            let mut max_rgb565: i32 = -1;
-            let mut min_rgb565: i32 = -1;
-
-            for i in 0..16 {
-                let c_rgb565 = dxt::rgb_to_rgb565(r[i], g[i], b[i]) as i32;
-                if max_rgb565 < 0 || c_rgb565 > max_rgb565 {
-                    max_rgb565 = c_rgb565;
-                }
-                if min_rgb565 < 0 || c_rgb565 < min_rgb565 {
-                    min_rgb565 = c_rgb565;
-                }
-            }
-
-            if max_rgb565 < min_rgb565 {
-                std::mem::swap(&mut max_rgb565, &mut min_rgb565);
-            }
-
-            let mut rgb565_0 = max_rgb565 as u16;
-            let rgb565_1 = min_rgb565 as u16;
-            let mut color_indices = 0u32;
-
-            if rgb565_0 == rgb565_1 {
-                rgb565_0 = rgb565_0.saturating_add(1);
-                color_indices = 1431655765;
-            } else {
-                let (r0, g0, b0) = dxt::rgb565_to_rgb(rgb565_0);
-                let (r1, g1, b1) = dxt::rgb565_to_rgb(rgb565_1);
-
-                let palettes = [
-                    [r0, g0, b0],
-                    [r1, g1, b1],
-                    [(2 * r0 + r1) / 3, (2 * g0 + g1) / 3, (2 * b0 + b1) / 3],
-                    [(r0 + 2 * r1) / 3, (g0 + 2 * g1) / 3, (b0 + 2 * b1) / 3],
-                ];
-
-                for i in 0..16 {
-                    let mut best_dist = i32::MAX;
-                    let mut best_idx = 0;
-                    for j in 0..4 {
-                        let dr = r[i] - palettes[j][0];
-                        let dg = g[i] - palettes[j][1];
-                        let db = b[i] - palettes[j][2];
-                        let dist = dr * dr + dg * dg + db * db;
-                        if dist < best_dist {
-                            best_dist = dist;
-                            best_idx = j;
-                        }
-                    }
-                    color_indices |= (best_idx as u32) << (i * 2);
-                }
-            }
-
-            dxt5[out_idx + 8..out_idx + 10].copy_from_slice(&rgb565_0.to_le_bytes());
-            dxt5[out_idx + 10..out_idx + 12].copy_from_slice(&rgb565_1.to_le_bytes());
-            dxt5[out_idx + 12..out_idx + 16].copy_from_slice(&color_indices.to_le_bytes());
+            let color_block = dxt5_color_block(&r, &g, &b, &a);
+            dxt5[out_idx + 8..out_idx + 16].copy_from_slice(&color_block);
 
             out_idx += 16;
         }
     }
     dxt5
+}
+
+fn dxt5_color_block(r: &[i32; 16], g: &[i32; 16], b: &[i32; 16], a: &[u8; 16]) -> [u8; 8] {
+    // Packed RGB565 ordering prioritizes red: a dark red/green edge can rank
+    // above the bright green fill and exclude it from the entire palette.
+    // Fit endpoint pairs from the visible colours instead. Hidden RGB must
+    // not affect the fit, and alpha squared measures error after compositing.
+    let mut colors = [0u16; 16];
+    let mut count = 0;
+    for i in 0..16 {
+        if a[i] == 0 {
+            continue;
+        }
+        let color = dxt::rgb_to_rgb565(r[i], g[i], b[i]);
+        if !colors[..count].contains(&color) {
+            colors[count] = color;
+            count += 1;
+        }
+    }
+
+    let expand = |color| {
+        let (r, g, b) = dxt::rgb565_to_rgb(color);
+        [r | (r >> 5), g | (g >> 6), b | (b >> 5)]
+    };
+    let mut best_error = u64::MAX;
+    let mut best_block = [0u8; 8];
+    for first in 0..count {
+        for second in 0..=first {
+            let mut c0 = colors[first].max(colors[second]);
+            let mut c1 = colors[first].min(colors[second]);
+            if c0 == c1 {
+                if c0 < u16::MAX {
+                    c0 += 1;
+                } else {
+                    c1 -= 1;
+                }
+            }
+            let p0 = expand(c0);
+            let p1 = expand(c1);
+            let palette = [
+                p0,
+                p1,
+                std::array::from_fn(|c| (2 * p0[c] + p1[c]) / 3),
+                std::array::from_fn(|c| (p0[c] + 2 * p1[c]) / 3),
+            ];
+            let mut error = 0u64;
+            let mut indices = 0u32;
+            for i in 0..16 {
+                if a[i] == 0 {
+                    continue;
+                }
+                let (index, distance) = palette
+                    .iter()
+                    .enumerate()
+                    .map(|(index, p)| {
+                        let dr = r[i] - p[0];
+                        let dg = g[i] - p[1];
+                        let db = b[i] - p[2];
+                        (index, dr * dr + dg * dg + db * db)
+                    })
+                    .min_by_key(|(_, distance)| *distance)
+                    .unwrap();
+                indices |= (index as u32) << (i * 2);
+                error += distance as u64 * u64::from(a[i]).pow(2);
+                if error >= best_error {
+                    break;
+                }
+            }
+            if error < best_error {
+                best_error = error;
+                best_block[..2].copy_from_slice(&c0.to_le_bytes());
+                best_block[2..4].copy_from_slice(&c1.to_le_bytes());
+                best_block[4..].copy_from_slice(&indices.to_le_bytes());
+            }
+        }
+    }
+    best_block
+}
+
+#[cfg(test)]
+mod texture_encoding_tests {
+    use super::image_to_dxt5_with_alpha;
+    use image::{Rgba, RgbaImage};
+
+    fn roundtrip(image: &RgbaImage) -> Vec<u8> {
+        let encoded = image_to_dxt5_with_alpha(image, 4, 4);
+        let mut decoded = vec![0; 64];
+        bcdec_rs::bc3(&encoded, &mut decoded, 16);
+        decoded
+    }
+
+    #[test]
+    fn green_fill_is_not_replaced_by_darker_redder_edge() {
+        // ColouredSmall's green fill has less red than its dark edge. Numeric
+        // RGB565 extrema used to turn (18,196,0) into roughly (24,72,0).
+        let mut image = RgbaImage::from_pixel(4, 4, Rgba([18, 196, 0, 255]));
+        image.put_pixel(2, 3, Rgba([24, 72, 0, 255]));
+        image.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
+        let decoded = roundtrip(&image);
+        for pixel in decoded[..14 * 4].chunks_exact(4) {
+            assert!(
+                pixel[0] <= 32 && pixel[1] >= 185 && pixel[2] <= 8,
+                "{pixel:?}"
+            );
+            assert_eq!(pixel[3], 255);
+        }
+        assert!(decoded[60..63].iter().all(|channel| *channel <= 8));
+    }
+
+    #[test]
+    fn hidden_rgb_does_not_pollute_visible_colours_or_change_alpha() {
+        let mut image = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 255, 0]));
+        image.put_pixel(0, 0, Rgba([18, 196, 0, 255]));
+        image.put_pixel(1, 0, Rgba([18, 196, 0, 255]));
+        let decoded = roundtrip(&image);
+        for pixel in decoded[..8].chunks_exact(4) {
+            assert!(
+                pixel[0] <= 24 && pixel[1] >= 190 && pixel[2] <= 8,
+                "{pixel:?}"
+            );
+            assert_eq!(pixel[3], 255);
+        }
+        assert!(decoded[8..].chunks_exact(4).all(|pixel| pixel[3] == 0));
+    }
+
+    #[test]
+    fn flat_black_white_and_transparent_blocks_remain_valid() {
+        for source in [[0, 0, 0, 255], [255, 255, 255, 255], [255, 0, 255, 0]] {
+            let decoded = roundtrip(&RgbaImage::from_pixel(4, 4, Rgba(source)));
+            for pixel in decoded.chunks_exact(4) {
+                assert_eq!(pixel[3], source[3]);
+                if source[3] != 0 {
+                    assert_eq!(&pixel[..3], &source[..3]);
+                }
+            }
+        }
+    }
 }
 
 pub fn patch_boost_meter(
@@ -1522,72 +1606,58 @@ impl BoostPatcherState {
             }
         }
 
-        ui.heading(t("tab-boost-meter-patcher"));
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            ui.strong(t("spoofer-search"));
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut self.search_input)
-                    .hint_text(t("ball-name-or-author"))
-                    .desired_width(180.0),
-            );
-            let submitted =
-                search_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(t("ball-search")).clicked() || submitted {
-                self.search_filter = self.search_input.clone();
+        crate::ui::browser::header(ui, t("tab-boost-meter-patcher"), |ui| {
+            if ui.button(t("btn-refresh")).clicked() {
+                if self.source == PatchSource::Catalog {
+                    self.catalog.refresh(ctx);
+                } else {
+                    self.refresh_boosts();
+                    let _ = tx.send(AppMsg::Log(
+                        "[Boost] Boost meter list refreshed.".to_string(),
+                    ));
+                }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(t("btn-refresh")).clicked() {
-                    if self.source == PatchSource::Catalog {
-                        self.catalog.refresh(ctx);
-                    } else {
-                        self.refresh_boosts();
-                        let _ = tx.send(AppMsg::Log(
-                            "[Boost] Boost meter list refreshed.".to_string(),
-                        ));
+            let restore_enabled = self.active_boost.is_some() && self.processing_target.is_none();
+            if ui
+                .add_enabled(
+                    restore_enabled,
+                    egui::Button::new(t("ball-restore-original"))
+                        .fill(egui::Color32::from_rgb(180, 50, 50)),
+                )
+                .clicked()
+            {
+                self.spawn_restore_thread(cooked_pc, backups_dir, tx, ctx);
+            }
+
+            if ui
+                .add_enabled(
+                    self.processing_target.is_none(),
+                    egui::Button::new(t("ball-import-zip")),
+                )
+                .clicked()
+            {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    if self.import_zip(&file, tx) {
+                        self.source = PatchSource::Custom;
+                        config.patcher.boost_source = self.source;
+                        let _ = config.save(&self.base_dir);
                     }
                 }
-
-                let restore_enabled =
-                    self.active_boost.is_some() && self.processing_target.is_none();
-                if ui
-                    .add_enabled(
-                        restore_enabled,
-                        egui::Button::new(t("ball-restore-original"))
-                            .fill(egui::Color32::from_rgb(180, 50, 50)),
-                    )
-                    .clicked()
-                {
-                    self.spawn_restore_thread(cooked_pc, backups_dir, tx, ctx);
-                }
-
-                if ui
-                    .add_enabled(
-                        self.processing_target.is_none(),
-                        egui::Button::new(t("ball-import-zip")),
-                    )
-                    .clicked()
-                {
-                    let dialog =
-                        rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
-                    if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
-                        if self.import_zip(&file, tx) {
-                            self.source = PatchSource::Custom;
-                            config.patcher.boost_source = self.source;
-                            let _ = config.save(&self.base_dir);
-                        }
-                    }
-                }
-                if ui
-                    .checkbox(&mut self.show_applied, t("ball-show-applied"))
-                    .changed()
-                {
-                    self.page = 0;
-                }
-            });
+            }
+            if ui
+                .checkbox(&mut self.show_applied, t("ball-show-applied"))
+                .changed()
+            {
+                self.page = 0;
+            }
         });
+        ui.add_space(8.0);
+        if crate::ui::browser::search(ui, &mut self.search_input, t("ball-name-or-author")) {
+            self.search_filter = self.search_input.clone();
+            self.page = 0;
+        }
 
         ui.add_space(8.0);
         ui.separator();
@@ -1600,7 +1670,7 @@ impl BoostPatcherState {
         ui.add_space(8.0);
 
         if self.source == PatchSource::Catalog {
-            if let Some(path) = self.catalog.render(ui, &self.search_filter, ctx, tx, 4) {
+            if let Some(path) = self.catalog.render(ui, &self.search_filter, ctx, tx) {
                 if self.import_zip(&path, tx) {
                     self.source = PatchSource::Custom;
                     config.patcher.boost_source = self.source;
@@ -1609,68 +1679,46 @@ impl BoostPatcherState {
             }
             return;
         }
+        let query = self.search_filter.to_lowercase().trim().to_string();
+        let filtered: Vec<BoostItem> = self
+            .boosts
+            .iter()
+            .filter(|b| {
+                b.name.to_lowercase().contains(&query)
+                    && (!self.show_applied || self.active_boost.as_deref() == Some(b.name.as_str()))
+            })
+            .cloned()
+            .collect();
+
+        let column_count = crate::ui::browser::columns(ui, 224.0);
+        let page_size = column_count * crate::ui::browser::ROWS;
+        crate::ui::browser::pagination(ui, &mut self.page, filtered.len(), page_size);
+        if filtered.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                if self.boosts.is_empty() {
+                    ui.label(
+                        egui::RichText::new(t("tab-no-boost-meters-found-in-the"))
+                            .color(egui::Color32::GRAY),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(t("tab-no-boost-meters-match-your-search"))
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+            return;
+        }
+
+        let start = self.page * page_size;
+        let visible: Vec<_> = filtered.into_iter().skip(start).take(page_size).collect();
         egui::ScrollArea::vertical()
             .id_salt("patcher_boosts_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let query = self.search_filter.to_lowercase().trim().to_string();
-                let filtered: Vec<BoostItem> = self
-                    .boosts
-                    .iter()
-                    .filter(|b| {
-                        b.name.to_lowercase().contains(&query)
-                            && (!self.show_applied
-                                || self.active_boost.as_deref() == Some(b.name.as_str()))
-                    })
-                    .cloned()
-                    .collect();
-
-                if filtered.is_empty() {
-                    ui.add_space(20.0);
-                    ui.vertical_centered(|ui| {
-                        if self.boosts.is_empty() {
-                            ui.label(
-                                egui::RichText::new(t("tab-no-boost-meters-found-in-the"))
-                                    .color(egui::Color32::GRAY),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new(t("tab-no-boost-meters-match-your-search"))
-                                    .color(egui::Color32::GRAY),
-                            );
-                        }
-                    });
-                    return;
-                }
-
-                const PAGE_SIZE: usize = 16;
-                let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
-                self.page = self.page.min(pages - 1);
-                ui.horizontal(|ui| {
-                    ui.label(t_args(
-                        "ball-page-page-of-pages",
-                        &[
-                            ("page", (self.page + 1).to_string().into()),
-                            ("pages", pages.to_string().into()),
-                        ],
-                    ));
-                    if ui
-                        .add_enabled(self.page > 0, egui::Button::new(t("ball-previous")))
-                        .clicked()
-                    {
-                        self.page -= 1;
-                    }
-                    if ui
-                        .add_enabled(self.page + 1 < pages, egui::Button::new(t("ball-next")))
-                        .clicked()
-                    {
-                        self.page += 1;
-                    }
-                });
-                let start = self.page * PAGE_SIZE;
-                let visible: Vec<_> = filtered.into_iter().skip(start).take(PAGE_SIZE).collect();
-                for row in visible.chunks(4) {
-                    ui.columns(4, |columns| {
+                for row in visible.chunks(column_count) {
+                    ui.columns(column_count, |columns| {
                         for (column, boost) in row.iter().enumerate() {
                             egui::Frame::group(columns[column].style()).show(
                                 &mut columns[column],

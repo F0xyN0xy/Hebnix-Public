@@ -6,7 +6,6 @@ mod discord_link;
 mod discord_presence;
 mod dpi_fix;
 mod epic_connection;
-mod hosts_file;
 mod hotkey;
 mod i18n;
 mod lite_app;
@@ -17,11 +16,13 @@ mod notifications;
 mod overlay;
 mod plugins;
 mod runtime_assets;
+mod recovery_tasks;
 mod statsapi_ini;
 mod theme;
 mod toast;
 mod tray;
 mod update;
+mod ui_work;
 mod ui {
     pub mod console;
 }
@@ -31,6 +32,8 @@ mod webview {
 }
 #[path = "lite_winutil.rs"]
 mod winutil;
+mod window_state;
+mod visibility;
 
 use lite_app::{DEFAULT_HEIGHT, DEFAULT_WIDTH, LiteApp, MIN_HEIGHT, MIN_WIDTH};
 
@@ -128,6 +131,9 @@ fn main() -> eframe::Result {
         winutil::focus_existing_instance();
         return Ok(());
     };
+    if let Err(error) = recovery_tasks::cleanup_websocket_once(&base_dir) {
+        tracing::warn!("WebSocket proxy cleanup: {error}");
+    }
     // after the instance guard, so only one copy prompts
     webview::runtime::ensure_present();
     let config = config::Config::load(&base_dir);

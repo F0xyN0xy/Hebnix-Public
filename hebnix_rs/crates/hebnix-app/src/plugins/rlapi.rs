@@ -151,7 +151,7 @@ fn poll_request(
         *pending = None;
         return Ok((
             LuaValue::Nil,
-            Some("Enable WebSockets or RLAPI and capture Rocket League's session first.".into()),
+            Some("WebSocket proxy features are unavailable.".into()),
         ));
     }
     let Some(generation) = session.connection_generation() else {

@@ -1,8 +1,10 @@
-//! Experimental baked paint for known cosmetic packages. This changes local asset
-//! defaults, not inventory paint attributes. Runtime materials/decals may override
-//! these defaults; each supported asset still needs an in-game visual check.
+//! Local paint for visual cosmetic packages. Updates material defaults and the
+//! model parameters reapplied when skins/attachments rebuild those materials.
+//! Inventory attributes stay intact; shaders still need in-game visual checks.
 use super::upk_package::{Prop, UpkPackage, strip};
 use std::path::Path;
+#[path = "painted_swap/runtime_parameters.rs"]
+mod runtime_parameters;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SwapPaint {
@@ -231,7 +233,7 @@ fn parse_hex(text: &str) -> Option<[u8; 3]> {
         u8::from_str_radix(&text[4..], 16).ok()?,
     ])
 }
-pub fn supports(donor: &str) -> bool {
+fn has_paint_template(donor: &str) -> bool {
     matches!(
         donor.to_ascii_lowercase().as_str(),
         "body_grain_sf.upk" | "boost_standard_sf.upk"
@@ -417,7 +419,37 @@ fn bake_impl(path: &Path, donor: &str, paint: SwapPaint, write: bool) -> Result<
     if paint == SwapPaint::Default {
         return Ok(0);
     }
-    if !supports(donor) {
+    if !write {
+        return Ok(bake_materials(path, donor, paint, false)?
+            + runtime_parameters::bake(path, paint, false)?);
+    }
+    // Runtime parameter sources and material defaults form one transaction.
+    // Skin/attachment rebuilding must see the same colour as the model's MIC.
+    let staged = path.with_extension("paint-runtime.tmp");
+    let result = (|| {
+        std::fs::copy(path, &staged).map_err(|e| e.to_string())?;
+        let materials = bake_materials(&staged, donor, paint, true)?;
+        let runtime = runtime_parameters::bake(&staged, paint, true)?;
+        std::fs::copy(&staged, path).map_err(|e| e.to_string())?;
+        Ok(materials + runtime)
+    })();
+    let _ = std::fs::remove_file(&staged);
+    result
+}
+
+fn bake_materials(
+    path: &Path,
+    donor: &str,
+    paint: SwapPaint,
+    write: bool,
+) -> Result<usize, String> {
+    if matches!(paint, SwapPaint::Preset(id) if id == 0 || id as usize > PALETTE.len()) {
+        return Err("Invalid paint preset".into());
+    }
+    if paint == SwapPaint::Default {
+        return Ok(0);
+    }
+    if !has_paint_template(donor) {
         return bake_declared_paint(path, paint, write);
     }
     let body = donor.eq_ignore_ascii_case("body_grain_sf.upk");
@@ -523,6 +555,34 @@ fn bake_impl(path: &Path, donor: &str, paint: SwapPaint, write: bool) -> Result<
     result
 }
 
+/// Recolour an owned item's pristine package without changing its identity.
+/// All parsing and verification happens in staging before replacing the live UPK.
+pub fn recolour_for_target(
+    source: &Path,
+    destination: &Path,
+    donor_filename: &str,
+    paint: SwapPaint,
+) -> Result<(), String> {
+    let parent = destination.parent().ok_or("No destination directory")?;
+    let staging = parent.join(format!(
+        ".hebnix-recolour-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    let staged = staging.join(destination.file_name().ok_or("No destination filename")?);
+    let result = (|| {
+        std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
+        bake(&staged, donor_filename, paint)?;
+        std::fs::copy(&staged, destination).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(staged.with_extension("paint.tmp"));
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&staging);
+    result
+}
+
 /// Keep the existing identity patch and paint patch together in staging, so a
 /// missing material or failed verification never installs a half-painted swap.
 pub fn patch_for_target(
@@ -576,8 +636,32 @@ pub fn patch_for_target(
     result
 }
 
-// Follow the asset's own paint settings rather than recolouring every material
-// that happens to have a colour-looking property. Shared team colours stay intact.
+/// These are colour controls, unlike vector parameters used for UVs, masks,
+/// positions or team colours. Official paint settings take precedence.
+fn local_colour_parameter(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "customcolor"
+            | "trimcolor"
+            | "paintcolor"
+            | "paintedcolor"
+            | "color"
+            | "colour"
+            | "diffusecolor"
+            | "diffusetint"
+            | "basecolor"
+            | "tintcolor"
+            | "colortint"
+    )
+}
+
+// Prefer the asset's paint settings. Without inventory paint metadata, use
+// explicit material colour controls belonging to the visual product itself.
 fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usize, String> {
     use std::collections::{HashMap, HashSet};
     let mut package = UpkPackage::load(path)?;
@@ -872,6 +956,73 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
             }
         }
     }
+    if parameter_names.is_empty() && materials.is_empty() {
+        let product_roots: HashSet<String> = package
+            .exports
+            .iter()
+            .filter(|e| strip(&package.class_of(e)).starts_with("ProductAsset_"))
+            .map(|e| {
+                package
+                    .asset_path(e.table_index as i32 + 1)
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        for material in &package.exports {
+            let class = package.class_of(material);
+            if !matches!(strip(&class), "Material" | "MaterialInstanceConstant") {
+                continue;
+            }
+            let path = package.asset_path(material.table_index as i32 + 1);
+            if !product_roots.contains(path.split('.').next().unwrap_or("")) {
+                continue;
+            }
+            let mut reference = material.table_index as i32 + 1;
+            let mut visited = HashSet::new();
+            let mut colours = HashSet::new();
+            while reference > 0 && visited.insert(reference) {
+                let parent = package
+                    .exports
+                    .get(reference as usize - 1)
+                    .ok_or("Invalid material parent")?;
+                if let Some(names) = declared_material_parameters.get(&parent.table_index) {
+                    colours.extend(
+                        names
+                            .iter()
+                            .filter(|name| local_colour_parameter(name))
+                            .cloned(),
+                    );
+                }
+                let (props, _) = package.serialized_props(parent)?;
+                for array in props
+                    .iter()
+                    .filter(|p| p.name == "VectorParameterValues" && p.tag_type == "ArrayProperty")
+                {
+                    for fields in struct_array(&package, array, parent.serial_offset)? {
+                        let name = named(&fields, "ParameterName", "NameProperty")?;
+                        let name = parameter_name(&package, name, 0)?;
+                        if local_colour_parameter(&name) {
+                            colours.insert(name);
+                        }
+                    }
+                }
+                reference = match props
+                    .iter()
+                    .find(|p| p.name == "Parent" && p.tag_type == "ObjectProperty")
+                {
+                    Some(p) => package.read_int(parent.serial_offset + p.value_offset)?,
+                    None => 0,
+                };
+            }
+            if !colours.is_empty() {
+                // Override on the product's MIC, leaving shared parent assets
+                // and unrelated effects (such as a body's exhaust) intact.
+                materials.insert(material.table_index, colours);
+            }
+        }
+    }
     let colour = paint.material();
     let bytes: Vec<u8> = colour.iter().flat_map(|v| v.to_le_bytes()).collect();
     let mut changes = Vec::new();
@@ -1120,7 +1271,7 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     changes.sort_by_key(|(at, _)| *at);
     changes.dedup_by_key(|(at, _)| *at);
     if changes.len() == routing_changes && insertions.is_empty() {
-        return Err("This item's paint is runtime-controlled or external; no local paint parameter could be patched. No swap was installed.".into());
+        return Err("This item has no editable local colour parameters. Its colours may be fixed in textures or controlled by the game. No change was installed.".into());
     }
     if !write {
         return Ok(changes.len() + insertions.len());

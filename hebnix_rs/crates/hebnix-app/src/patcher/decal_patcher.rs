@@ -1761,6 +1761,18 @@ pub struct SkinInfo {
     pub id: String,
     pub name: String,
     pub upk_path: String,
+    pub asset_path: Option<String>,
+    pub shared_package: bool,
+}
+
+impl SkinInfo {
+    fn same_target(&self, other: &Self) -> bool {
+        self.upk_path.eq_ignore_ascii_case(&other.upk_path)
+            && (!(self.shared_package || other.shared_package)
+                || (self.id == other.id
+                    && self.asset_path.as_deref().map(str::to_ascii_lowercase)
+                        == other.asset_path.as_deref().map(str::to_ascii_lowercase)))
+    }
 }
 
 #[derive(Clone)]
@@ -2457,21 +2469,17 @@ fn sort_and_deduplicate_decal_targets(
             .then_with(|| left.0.cmp(&right.0))
     });
 
-    // API catalogs can repeat a package under different names, or repeat a
-    // display name across car-specific and universal entries. Either form is
-    // indistinguishable in the picker, so keep one deterministic target and
-    // prefer the selected car's entry over the universal fallback.
-    let mut seen_packages = HashSet::new();
-    let mut seen_names = HashSet::new();
+    // Deduplicate aliases of the same product, preserving products that share
+    // a package or display name. Prefer the selected car over universal aliases.
+    let mut seen_products = HashSet::new();
     targets.retain(|(_, skin)| {
-        let package = skin.upk_path.to_ascii_lowercase();
-        let name = skin.name.trim().to_ascii_lowercase();
-        if seen_packages.contains(&package) || seen_names.contains(&name) {
-            return false;
-        }
-        seen_packages.insert(package);
-        seen_names.insert(name);
-        true
+        seen_products.insert((
+            skin.id.clone(),
+            skin.asset_path
+                .as_deref()
+                .unwrap_or(&skin.upk_path)
+                .to_ascii_lowercase(),
+        ))
     });
 }
 
@@ -2548,9 +2556,7 @@ impl DecalPatcherState {
                     .and_then(|(active_car, active_skin)| {
                         self.find_skin(active_car, active_skin).ok()
                     })
-                    .is_some_and(|active_skin| {
-                        active_skin.upk_path.eq_ignore_ascii_case(&skin.upk_path)
-                    })
+                    .is_some_and(|active_skin| active_skin.same_target(skin))
             })
     }
 
@@ -2612,8 +2618,12 @@ impl DecalPatcherState {
             let mut skin_list = Vec::new();
 
             for skin in skins {
-                let id = match skin.get("id").and_then(|v| v.as_str()) {
-                    Some(id) => id.to_string(),
+                let id = match skin.get("id").and_then(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .or_else(|| v.as_i64().map(|id| id.to_string()))
+                }) {
+                    Some(id) => id,
                     None => continue,
                 };
                 let name = match skin.get("name").and_then(|v| v.as_str()) {
@@ -2624,7 +2634,13 @@ impl DecalPatcherState {
                     Some(s) => s.to_string(),
                     None => continue,
                 };
-                skin_list.push(SkinInfo { id, name, upk_path });
+                skin_list.push(SkinInfo {
+                    id,
+                    name,
+                    upk_path,
+                    asset_path: skin.get("path").and_then(Value::as_str).map(str::to_string),
+                    shared_package: false,
+                });
             }
 
             if !skin_list.is_empty() {
@@ -2636,6 +2652,20 @@ impl DecalPatcherState {
             }
         }
 
+        let mut packages: HashMap<String, HashSet<String>> = HashMap::new();
+        for car in &car_skins {
+            for skin in &car.skins {
+                packages
+                    .entry(skin.upk_path.to_ascii_lowercase())
+                    .or_default()
+                    .insert(skin.id.clone());
+            }
+        }
+        for car in &mut car_skins {
+            for skin in &mut car.skins {
+                skin.shared_package = packages[&skin.upk_path.to_ascii_lowercase()].len() > 1;
+            }
+        }
         car_skins.sort_by(|a, b| a.car_name.cmp(&b.car_name));
         self.car_skins = car_skins;
         if !self.car_skins.is_empty() {
@@ -2804,6 +2834,25 @@ impl DecalPatcherState {
         targets
     }
 
+    fn visible_decal_targets_for_body(
+        &self,
+        body_car_key: &str,
+        owned_ids: &HashSet<i64>,
+        only_owned: bool,
+    ) -> Vec<(String, SkinInfo)> {
+        self.decal_targets_for_body(body_car_key)
+            .into_iter()
+            .filter(|(_, skin)| {
+                !only_owned
+                    || skin
+                        .id
+                        .parse::<i64>()
+                        .ok()
+                        .is_some_and(|id| owned_ids.contains(&id))
+            })
+            .collect()
+    }
+
     fn carrier_skins(&self, body_car_key: Option<&str>, target_car_key: &str) -> Vec<SkinInfo> {
         let carrier_key = body_car_key.unwrap_or(target_car_key);
         self.car_skins
@@ -2892,6 +2941,11 @@ impl DecalPatcherState {
 
         let skin_info = self.find_skin(car_key, skin_id)?;
         let active_key = format!("{car_key}|{skin_id}");
+        let legacy_package = skin_info.shared_package
+            && super::decal_variant::legacy_shared_package(
+                &cooked_pc.join(&skin_info.upk_path),
+                &backups_dir.join(format!("{}.bak", skin_info.upk_path)),
+            )?;
         let replaced_keys = self
             .active_decals
             .keys()
@@ -2902,7 +2956,11 @@ impl DecalPatcherState {
                         .and_then(|(active_car, active_skin)| {
                             self.find_skin(active_car, active_skin).ok()
                         })
-                        .is_some_and(|skin| skin.upk_path.eq_ignore_ascii_case(&skin_info.upk_path))
+                        .is_some_and(|skin| {
+                            skin.same_target(&skin_info)
+                                || (legacy_package
+                                    && skin.upk_path.eq_ignore_ascii_case(&skin_info.upk_path))
+                        })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -2945,6 +3003,10 @@ impl DecalPatcherState {
                 name.contains("esports") || name.contains("(home)") || name.contains("(away)");
             (!preferred, skin.name.clone())
         });
+        let carrier_sources: Vec<_> = donor_skins
+            .iter()
+            .filter_map(|skin| Some((skin.upk_path.clone(), skin.asset_path.clone()?)))
+            .collect();
         let donor_upks = donor_skins
             .into_iter()
             .map(|skin| skin.upk_path)
@@ -2975,6 +3037,8 @@ impl DecalPatcherState {
         let field_labels_clone = entry.field_labels.clone();
         let target_candidates_clone = target_candidates.clone();
         let selected_skin_upk = skin_info.upk_path.clone();
+        let selected_skin_asset = skin_info.asset_path.clone();
+        let shared_package = skin_info.shared_package;
         let donor_upks_clone = donor_upks;
         let local_tx = self.local_tx.clone();
         let ctx_clone = ctx.clone();
@@ -2984,39 +3048,42 @@ impl DecalPatcherState {
             let progress_tx = local_tx.clone();
             let snapshot =
                 fs::read(cooked_clone.join(&selected_skin_upk)).map_err(|error| error.to_string());
-            let result = snapshot
-                .as_ref()
-                .map_err(Clone::clone)
-                .map(|_| ())
-                .and_then(|()| {
-                    restore_package_texture_regions(
-                        &selected_skin_upk,
+            let result = if shared_package {
+                (|| {
+                    let target_asset = selected_skin_asset
+                        .as_deref()
+                        .ok_or("The shared decal has no catalog asset path")?;
+                    let (donor, donor_asset) = carrier_sources
+                        .iter()
+                        .find_map(|(name, asset)| {
+                            let backup = backups_clone.join(format!("{name}.bak"));
+                            let source = if backup.is_file() {
+                                backup
+                            } else {
+                                cooked_clone.join(name)
+                            };
+                            package_supports_decal_fields(
+                                entry.body_id,
+                                &source,
+                                &cooked_clone,
+                                &base_dir_clone,
+                                &fields_clone,
+                            )
+                            .ok()
+                            .filter(|supported| *supported)
+                            .map(|_| (source, asset))
+                        })
+                        .ok_or("No compatible full-colour decal carrier was found for this car")?;
+                    let (carrier, carrier_asset) = super::decal_variant::make_carrier(
+                        &donor,
+                        donor_asset,
+                        target_asset,
                         &cooked_clone,
-                        &backups_clone,
                         &base_dir_clone,
-                    )
-                })
-                .and_then(|()| {
-                    prepare_specific_decal_carrier(
+                    )?;
+                    let (_, fields) = patch_decal_on_skin(
                         entry.body_id,
-                        &selected_skin_upk,
-                        &donor_upks_clone,
-                        &cooked_clone,
-                        &backups_clone,
-                        &base_dir_clone,
-                        &fields_clone,
-                        &|fraction, label| {
-                            let _ = progress_tx.send(DecalOp::Progress {
-                                fraction,
-                                label: label.into(),
-                            });
-                        },
-                    )
-                })
-                .and_then(|_| {
-                    patch_decal_on_skin(
-                        entry.body_id,
-                        &target_candidates_clone,
+                        &[(carrier.clone(), true)],
                         &cooked_clone,
                         &backups_clone,
                         &base_dir_clone,
@@ -3030,8 +3097,70 @@ impl DecalPatcherState {
                                 label: label.into(),
                             });
                         },
-                    )
-                });
+                    )?;
+                    if crate::speed_patch::is_active(speed) {
+                        crate::speed_patch::apply(&cooked_clone.join(&carrier), None, speed)?;
+                    }
+                    super::decal_variant::link_product(
+                        &cooked_clone.join(carrier),
+                        &carrier_asset,
+                        &cooked_clone.join(&selected_skin_upk),
+                        &backups_clone.join(format!("{selected_skin_upk}.bak")),
+                        target_asset,
+                        &base_dir_clone,
+                    )?;
+                    Ok((selected_skin_upk.clone(), fields))
+                })()
+            } else {
+                snapshot
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .map(|_| ())
+                    .and_then(|()| {
+                        restore_package_texture_regions(
+                            &selected_skin_upk,
+                            &cooked_clone,
+                            &backups_clone,
+                            &base_dir_clone,
+                        )
+                    })
+                    .and_then(|()| {
+                        prepare_specific_decal_carrier(
+                            entry.body_id,
+                            &selected_skin_upk,
+                            &donor_upks_clone,
+                            &cooked_clone,
+                            &backups_clone,
+                            &base_dir_clone,
+                            &fields_clone,
+                            &|fraction, label| {
+                                let _ = progress_tx.send(DecalOp::Progress {
+                                    fraction,
+                                    label: label.into(),
+                                });
+                            },
+                        )
+                    })
+                    .and_then(|_| {
+                        patch_decal_on_skin(
+                            entry.body_id,
+                            &target_candidates_clone,
+                            &cooked_clone,
+                            &backups_clone,
+                            &base_dir_clone,
+                            &fields_clone,
+                            &field_labels_clone,
+                            true,
+                            true,
+                            &|fraction, label| {
+                                let _ = progress_tx.send(DecalOp::Progress {
+                                    fraction,
+                                    label: label.into(),
+                                });
+                            },
+                        )
+                    })
+            };
             if result.is_err() {
                 if let Ok(bytes) = snapshot {
                     if let Err(error) = fs::write(cooked_clone.join(&selected_skin_upk), bytes) {
@@ -3044,7 +3173,7 @@ impl DecalPatcherState {
 
             match result {
                 Ok((target_upk, _patched_fields)) => {
-                    if crate::speed_patch::is_active(speed) {
+                    if !shared_package && crate::speed_patch::is_active(speed) {
                         match crate::speed_patch::apply(
                             &cooked_clone.join(&target_upk),
                             Some(&backups_clone.join(format!("{target_upk}.bak"))),
@@ -3101,6 +3230,16 @@ impl DecalPatcherState {
 
         // Find the skin info to get the target UPK
         let skin_info = self.find_skin(car_key, skin_id)?;
+        let variant_asset = if skin_info.shared_package {
+            Some(
+                skin_info
+                    .asset_path
+                    .clone()
+                    .ok_or("The shared decal has no catalog asset path")?,
+            )
+        } else {
+            None
+        };
         let target_candidates = vec![skin_info.upk_path];
 
         self.processing_target = Some(format!("Restoring {}", decal_name));
@@ -3119,6 +3258,13 @@ impl DecalPatcherState {
                 let backup = backups_clone.join(format!("{target}.bak"));
                 if !backup.is_file() {
                     return Err(format!("No decal package backup was found for {target}"));
+                }
+                if let Some(asset) = variant_asset.as_deref() {
+                    return super::decal_variant::restore_product(
+                        &cooked_clone.join(target),
+                        &backup,
+                        asset,
+                    );
                 }
                 restore_package_texture_regions(
                     target,
@@ -3158,12 +3304,21 @@ impl DecalPatcherState {
             return Err(error);
         }
         let mut target_candidates = HashSet::new();
+        let mut variant_targets = Vec::new();
         for active_key in self.active_decals.keys() {
             let Some((car_key, skin_id)) = active_key.split_once('|') else {
                 continue;
             };
             if let Ok(skin) = self.find_skin(car_key, skin_id) {
-                target_candidates.insert(skin.upk_path);
+                if skin.shared_package {
+                    variant_targets.push((
+                        skin.upk_path,
+                        skin.asset_path
+                            .ok_or("The shared decal has no catalog asset path")?,
+                    ));
+                } else {
+                    target_candidates.insert(skin.upk_path);
+                }
             }
         }
         // Include shared packages touched by older Rust builds so Restore All
@@ -3181,7 +3336,7 @@ impl DecalPatcherState {
                 }
             }
         }
-        if target_candidates.is_empty() {
+        if target_candidates.is_empty() && variant_targets.is_empty() {
             return Err("No active decals to restore".to_string());
         }
 
@@ -3193,8 +3348,30 @@ impl DecalPatcherState {
         let target_candidates: Vec<String> = target_candidates.into_iter().collect();
         let local_tx = self.local_tx.clone();
         let ctx_clone = ctx.clone();
+        let base_dir_clone = self.base_dir.clone();
         std::thread::spawn(move || {
-            match restore_all_decal_files(&target_candidates, &cooked_clone, &backups_clone) {
+            let result = (|| {
+                let mut count = 0;
+                for target in &target_candidates {
+                    restore_package_texture_regions(
+                        target,
+                        &cooked_clone,
+                        &backups_clone,
+                        &base_dir_clone,
+                    )?;
+                    count += 1;
+                }
+                for (name, asset) in variant_targets {
+                    super::decal_variant::restore_product(
+                        &cooked_clone.join(&name),
+                        &backups_clone.join(format!("{name}.bak")),
+                        &asset,
+                    )?;
+                    count += 1;
+                }
+                Ok::<_, String>(count)
+            })();
+            match result {
                 Ok(count) => {
                     let _ = local_tx.send(DecalOp::RestoredAll { count });
                 }
@@ -3491,81 +3668,97 @@ impl DecalPatcherState {
         tx: &Sender<AppMsg>,
         ctx: &egui::Context,
         config: &mut Config,
+        owned_inventory: &mut crate::owned_inventory::OwnedInventory,
     ) {
         self.handle_op_result(tx, config);
+        owned_inventory.show_with_actions(ui, |ui| {
+            let label = "Show only owned items";
+            let width = ui.spacing().icon_width
+                + ui.spacing().icon_spacing
+                + ui.painter()
+                    .layout_no_wrap(
+                        label.into(),
+                        egui::TextStyle::Body.resolve(ui.style()),
+                        ui.visuals().text_color(),
+                    )
+                    .size()
+                    .x;
+            let remaining = ui.available_size_before_wrap().x;
+            let width = if remaining >= width {
+                remaining
+            } else {
+                ui.max_rect().width()
+            };
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .checkbox(&mut config.patcher.decal_only_owned, label)
+                        .changed()
+                    {
+                        let _ = config.save(&self.base_dir);
+                    }
+                },
+            );
+        });
+        let owned_ids = &owned_inventory.ids;
         let tab_rect = ui.available_rect_before_wrap();
         let busy = self.processing_target.is_some();
         let key_ok = self.validate_key_file().is_ok();
 
-        ui.heading(t("app-decal-patcher"));
-        ui.add_space(8.0);
-
-        let compact_toolbar = ui.available_width() < 900.0;
-        ui.horizontal_wrapped(|ui| {
-            ui.strong(t("spoofer-search"));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.search_input)
-                    .hint_text(t("ball-name-or-author"))
-                    .desired_width(180.0),
-            );
-            let submitted =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button(t("ball-search")).clicked() || submitted {
-                self.search_filter = self.search_input.clone();
-                self.page = 0;
-            }
-
-            if compact_toolbar {
-                ui.end_row();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(t("btn-refresh")).clicked() {
-                    if self.source == PatchSource::Catalog {
-                        self.catalog.refresh(ctx);
-                    } else {
-                        self.refresh_decals();
-                        let _ = tx.send(AppMsg::Log("[Decals] Decal list refreshed.".into()));
-                    }
+        crate::ui::browser::header(ui, t("app-decal-patcher"), |ui| {
+            if ui.button(t("btn-refresh")).clicked() {
+                if self.source == PatchSource::Catalog {
+                    self.catalog.refresh(ctx);
+                } else {
+                    self.refresh_decals();
+                    let _ = tx.send(AppMsg::Log("[Decals] Decal list refreshed.".into()));
                 }
-                if ui
-                    .add_enabled(
-                        !self.active_decals.is_empty() && !busy && key_ok,
-                        egui::Button::new(t("ball-restore-original"))
-                            .fill(egui::Color32::from_rgb(180, 50, 50)),
-                    )
-                    .on_hover_text(t("tab-restore-every-patched-decal"))
-                    .clicked()
-                {
-                    self.restore_all_confirmed = true;
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new(t("ball-import-zip")))
-                    .clicked()
-                {
-                    let dialog =
-                        rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
-                    if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
-                        match self.import_zip(&file, tx) {
-                            Ok(()) => {
-                                self.source = PatchSource::Custom;
-                                config.patcher.decal_source = self.source;
-                                let _ = config.save(&self.base_dir);
-                            }
-                            Err(error) => {
-                                let _ = tx
-                                    .send(AppMsg::Log(format!("[Decals] Import failed: {error}")));
-                            }
+            }
+            if ui
+                .add_enabled(
+                    !self.active_decals.is_empty() && !busy && key_ok,
+                    egui::Button::new(t("ball-restore-original"))
+                        .fill(egui::Color32::from_rgb(180, 50, 50)),
+                )
+                .on_hover_text(t("tab-restore-every-patched-decal"))
+                .clicked()
+            {
+                self.restore_all_confirmed = true;
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new(t("ball-import-zip")))
+                .clicked()
+            {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    match self.import_zip(&file, tx) {
+                        Ok(()) => {
+                            self.source = PatchSource::Custom;
+                            config.patcher.decal_source = self.source;
+                            let _ = config.save(&self.base_dir);
+                        }
+                        Err(error) => {
+                            let _ =
+                                tx.send(AppMsg::Log(format!("[Decals] Import failed: {error}")));
                         }
                     }
                 }
-                if ui
-                    .checkbox(&mut self.show_applied, t("ball-show-applied"))
-                    .changed()
-                {
-                    self.page = 0;
-                }
-            });
+            }
+            if ui
+                .checkbox(&mut self.show_applied, t("ball-show-applied"))
+                .changed()
+            {
+                self.page = 0;
+            }
         });
+        ui.add_space(8.0);
+        if crate::ui::browser::search(ui, &mut self.search_input, t("ball-name-or-author")) {
+            self.search_filter = self.search_input.clone();
+            self.page = 0;
+        }
+        let only_owned = config.patcher.decal_only_owned;
 
         ui.add_space(8.0);
         ui.separator();
@@ -3630,11 +3823,11 @@ impl DecalPatcherState {
                 .max_rect(grid_rect),
             |ui| {
                 ui.shrink_clip_rect(grid_rect);
-                let column_count = 3;
+                let column_count = crate::ui::browser::columns(ui, 224.0);
                 if self.source == PatchSource::Catalog {
                     if let Some(path) =
                         self.catalog
-                            .render(ui, &self.search_filter, ctx, tx, column_count)
+                            .render(ui, &self.search_filter, ctx, tx)
                     {
                         match self.import_zip(&path, tx) {
                             Ok(()) => {
@@ -3670,35 +3863,13 @@ impl DecalPatcherState {
                     .cloned()
                     .collect();
 
-                const PAGE_SIZE: usize = 12;
-                let pages = filtered.len().div_ceil(PAGE_SIZE).max(1);
-                self.page = self.page.min(pages - 1);
-                ui.horizontal(|ui| {
-                    ui.label(t_args(
-                        "ball-page-page-of-pages",
-                        &[
-                            ("page", (self.page + 1).to_string().into()),
-                            ("pages", pages.to_string().into()),
-                        ],
-                    ));
-                    if ui
-                        .add_enabled(self.page > 0, egui::Button::new(t("ball-previous")))
-                        .clicked()
-                    {
-                        self.page -= 1;
-                    }
-                    if ui
-                        .add_enabled(self.page + 1 < pages, egui::Button::new(t("ball-next")))
-                        .clicked()
-                    {
-                        self.page += 1;
-                    }
-                });
+                let page_size = column_count * crate::ui::browser::ROWS;
+                crate::ui::browser::pagination(ui, &mut self.page, filtered.len(), page_size);
 
                 let visible: Vec<_> = filtered
                     .into_iter()
-                    .skip(self.page * PAGE_SIZE)
-                    .take(PAGE_SIZE)
+                    .skip(self.page * page_size)
+                    .take(page_size)
                     .collect();
                 egui::ScrollArea::vertical()
                     .id_salt("patcher_decals_scroll")
@@ -3770,7 +3941,7 @@ impl DecalPatcherState {
                                                 let target_options = body_car_key
                                                     .as_deref()
                                                     .map(|car_key| {
-                                                        self.decal_targets_for_body(car_key)
+                                                        self.visible_decal_targets_for_body(car_key, owned_ids, only_owned)
                                                     })
                                                     .unwrap_or_default();
                                                 let selected_text = selected_target
@@ -3914,12 +4085,10 @@ impl DecalPatcherState {
                                                     .as_deref()
                                                     .and_then(|key| key.split_once('|'))
                                                     .and_then(|(car_key, skin_id)| {
-                                                        self.find_skin(car_key, skin_id)
-                                                            .ok()
-                                                            .map(|skin| (car_key, skin))
+                                                        target_options.iter().find(|(owner, skin)| owner == car_key && skin.id == skin_id)
                                                     })
                                                     .is_some_and(|(car_key, skin)| {
-                                                        !self.target_is_patched(car_key, &skin)
+                                                        !self.target_is_patched(car_key, skin)
                                                     });
                                                 let can_apply = target_available && !busy && key_ok;
                                                 if config.speed_patch.items_page {
@@ -4824,6 +4993,8 @@ mod decal_matching_tests {
                     id: key.into(),
                     name: key.into(),
                     upk_path: format!("{key}.upk"),
+                    asset_path: None,
+                    shared_package: false,
                 }],
             })
             .collect();
@@ -5047,5 +5218,187 @@ mod decal_import_tests {
                     .starts_with("hebnix-decal-import-")
         );
         fs::remove_dir_all(resolved).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod shared_variant_catalog_tests {
+    use super::*;
+    #[test]
+    fn custom_patch_picker_keeps_all_rank_products_and_independent_status() {
+        let base =
+            std::env::temp_dir().join(format!("hebnix-variant-catalog-{}", rand::random::<u64>()));
+        let mut state = DecalPatcherState::new(&base, &Config::default());
+        let skins =
+            serde_json::from_str(include_str!("../../testdata/season12-variants.json")).unwrap();
+        state
+            .set_catalogs(skins, serde_json::json!({"bodies":[]}))
+            .unwrap();
+        let targets = state.decal_targets_for_body("OCTANE");
+        assert_eq!(targets.len(), 7);
+        assert!(
+            targets
+                .iter()
+                .all(|(_, skin)| skin.shared_package && skin.asset_path.is_some())
+        );
+        // Owning one rank must not expose the other products in its shared UPK.
+        let owned_ids = HashSet::from([4659, 4681]);
+        let owned = state.visible_decal_targets_for_body("OCTANE", &owned_ids, true);
+        assert_eq!(
+            owned
+                .iter()
+                .map(|(_, skin)| skin.id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["4659", "4681"])
+        );
+        assert_eq!(
+            state
+                .visible_decal_targets_for_body("OCTANE", &owned_ids, false)
+                .len(),
+            7
+        );
+        assert!(
+            state
+                .visible_decal_targets_for_body("OCTANE", &HashSet::new(), true)
+                .is_empty()
+        );
+        let other_account =
+            state.visible_decal_targets_for_body("OCTANE", &HashSet::from([4660]), true);
+        assert_eq!(other_account.len(), 1);
+        assert_eq!(other_account[0].1.id, "4660");
+        state
+            .active_decals
+            .insert("UNIVERSAL|4681".into(), "Silver artwork".into());
+        for (owner, skin) in targets {
+            assert_eq!(state.target_is_patched(&owner, &skin), skin.id == "4681");
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(base);
+    }
+}
+#[cfg(test)]
+mod shared_variant_texture_tests {
+    use super::*;
+    use crate::patcher::{
+        decal_variant,
+        upk_package::{UpkPackage, strip},
+    };
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+    fn products(package: &UpkPackage) -> Vec<Vec<u8>> {
+        package
+            .exports
+            .iter()
+            .filter(|e| strip(&package.class_of(e)) == "ProductAsset_Skin_TA")
+            .map(|e| package.image[e.serial_offset..e.serial_offset + e.serial_size].to_vec())
+            .collect()
+    }
+    #[test]
+    #[ignore = "requires HEBNIX_VARIANT_GAME_DIR; reads installed packages and patches only target/ copies"]
+    fn full_colour_png_patch_isolated_from_other_rank_variants_and_tfc_mips() {
+        let root = PathBuf::from(
+            std::env::var("HEBNIX_VARIANT_GAME_DIR")
+                .expect("Set HEBNIX_VARIANT_GAME_DIR to CookedPCConsole"),
+        );
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/variant-texture-check-{}",
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&out).unwrap();
+        let shared = "skin_seasontwelve_SF.upk";
+        let live = out.join(shared);
+        let backup = out.join(format!("{shared}.bak"));
+        fs::copy(root.join(shared), &live).unwrap();
+        fs::copy(&live, &backup).unwrap();
+        let before = products(&UpkPackage::load(&live).unwrap());
+        let silver = "skin_seasontwelve.skin_seasontwelve02";
+        let (carrier, asset) = decal_variant::make_carrier(
+            &root.join("skin_octane_g2_esports_SF.upk"),
+            "skin_octane_g2_esports.v3.skin_octane_g2_esports",
+            silver,
+            &out,
+            &out,
+        )
+        .unwrap();
+        let mut package =
+            EncryptedPackage::load(fs::read(out.join(&carrier)).unwrap(), &out).unwrap();
+        let textures = parse_texture_exports(&package, &root).unwrap();
+        let mut original_regions = Vec::new();
+        // Compact test caches contain only the carrier's original mip regions.
+        // Installed TFCs are opened read-only and never copied or modified whole.
+        for texture in &textures {
+            let Some(name) = &texture.tfc_name else {
+                continue;
+            };
+            let filename = format!("{name}.tfc");
+            let mut source = fs::File::open(root.join(&filename)).unwrap();
+            let mut target = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(out.join(&filename))
+                .unwrap();
+            for mip in &texture.mips {
+                let mut bytes = vec![0; mip.disk_size];
+                source.seek(SeekFrom::Start(mip.tfc_offset as u64)).unwrap();
+                source.read_exact(&mut bytes).unwrap();
+                let compact_offset = (target.metadata().unwrap().len() + 15) & !15;
+                target.seek(SeekFrom::Start(compact_offset)).unwrap();
+                target.write_all(&bytes).unwrap();
+                let width = if mip.legacy_offset { 4 } else { 8 };
+                if width == 4 {
+                    package.logical_data[mip.offset_field..mip.offset_field + 4]
+                        .copy_from_slice(&(compact_offset as u32).to_le_bytes());
+                } else {
+                    package.logical_data[mip.offset_field..mip.offset_field + 8]
+                        .copy_from_slice(&(compact_offset as i64).to_le_bytes());
+                }
+                package
+                    .mark_modified_range(mip.offset_field, mip.offset_field + width)
+                    .unwrap();
+                original_regions.push((filename.clone(), compact_offset, bytes));
+            }
+        }
+        fs::write(out.join(&carrier), repack_package(&package).unwrap()).unwrap();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            16,
+            image::Rgba([190, 30, 220, 255]),
+        ));
+        let mut png = Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let fields = HashMap::from([("Diffuse".to_string(), png.into_inner())]);
+        patch_decal_on_skin(
+            23,
+            &[(carrier.clone(), true)],
+            &out,
+            &out,
+            &out,
+            &fields,
+            &HashMap::new(),
+            true,
+            true,
+            &|_, _| {},
+        )
+        .unwrap();
+        for (file, offset, before) in original_regions {
+            let mut current = fs::File::open(out.join(file)).unwrap();
+            let mut bytes = vec![0; before.len()];
+            current.seek(SeekFrom::Start(offset as u64)).unwrap();
+            current.read_exact(&mut bytes).unwrap();
+            assert_eq!(
+                before, bytes,
+                "isolated patch overwrote an existing TFC mip"
+            );
+        }
+        decal_variant::link_product(&out.join(carrier), &asset, &live, &backup, silver, &out)
+            .unwrap();
+        let after = products(&UpkPackage::load(&live).unwrap());
+        assert_ne!(before[1], after[1]);
+        for i in [0, 2, 3, 4, 5, 6] {
+            assert_eq!(before[i], after[i], "rank {i} changed");
+        }
+        decal_variant::restore_product(&live, &backup, silver).unwrap();
+        assert_eq!(before, products(&UpkPackage::load(&live).unwrap()));
     }
 }

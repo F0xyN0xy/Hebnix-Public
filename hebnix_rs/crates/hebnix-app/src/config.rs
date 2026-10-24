@@ -48,7 +48,7 @@ pub struct SettingsCfg {
     pub allow_draw_on_hebnix_focus: bool,
     pub toast_position: crate::toast::ToastPos,
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
-    /// relaunch elevated on start, the hosts file needs admin
+    /// Relaunch elevated on start when requested by the user.
     pub run_as_admin: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
     pub discord_rich_presence: bool,
@@ -178,17 +178,15 @@ fn default_replay_naming_template() -> String {
 }
 
 impl ReplayUploadCfg {
-    pub fn enabled_for_spoofer(&self, spoofer_enabled: bool) -> bool {
-        spoofer_enabled && (self.upload_enabled || self.save_locally)
+    pub fn enabled_for_spoofer(&self, _spoofer_enabled: bool) -> bool {
+        false
     }
 
-    /// Disable capture preferences without discarding upload credentials/settings.
-    pub fn enforce_spoofer(&mut self, spoofer_enabled: bool) -> bool {
-        let changed = !spoofer_enabled && (self.upload_enabled || self.save_locally);
-        if !spoofer_enabled {
-            self.upload_enabled = false;
-            self.save_locally = false;
-        }
+    /// Retired WebSocket capture stays disabled; preserve upload credentials/settings.
+    pub fn enforce_spoofer(&mut self, _spoofer_enabled: bool) -> bool {
+        let changed = self.upload_enabled || self.save_locally;
+        self.upload_enabled = false;
+        self.save_locally = false;
         changed
     }
 }
@@ -220,6 +218,7 @@ pub struct PatcherCfg {
     pub ball_source: PatchSource,
     pub boost_source: PatchSource,
     pub decal_source: PatchSource,
+    pub decal_only_owned: bool,
     pub car_source: PatchSource,
 }
 
@@ -477,7 +476,7 @@ pub fn base_dir() -> PathBuf {
 mod replay_dependency_tests {
     use super::ReplayUploadCfg;
     #[test]
-    fn replay_preferences_require_spoofer_and_preserve_other_settings() {
+    fn retired_replay_preferences_stay_disabled_and_preserve_other_settings() {
         for (save, upload) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut config = ReplayUploadCfg {
                 save_locally: save,
@@ -486,11 +485,11 @@ mod replay_dependency_tests {
                 save_directory: "keep-directory".into(),
                 ..Default::default()
             };
-            assert_eq!(config.enabled_for_spoofer(true), save || upload);
+            assert!(!config.enabled_for_spoofer(true));
             assert!(!config.enabled_for_spoofer(false));
-            assert!(!config.enforce_spoofer(true));
-            assert_eq!((config.save_locally, config.upload_enabled), (save, upload));
-            assert_eq!(config.enforce_spoofer(false), save || upload);
+            assert_eq!(config.enforce_spoofer(true), save || upload);
+            assert_eq!((config.save_locally, config.upload_enabled), (false, false));
+            assert!(!config.enforce_spoofer(false));
             assert!(!config.save_locally && !config.upload_enabled);
             assert_eq!(config.api_key, "keep-key");
             assert_eq!(config.save_directory, "keep-directory");

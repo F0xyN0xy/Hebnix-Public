@@ -15,7 +15,7 @@ pub enum AppMsg {
     StatsApiInitialised,
     WindowMode(WindowMode),
     ToggleVisibility,
-    TrayVisibility(bool),
+    TrayToggleVisibility,
     TrayQuit,
     HotkeyCaptured(Option<String>),
     Topmost(bool),

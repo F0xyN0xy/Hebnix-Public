@@ -30,7 +30,15 @@ pub fn load(filepath: &Path, check_crc: bool) -> Result<SaveData, crypto::SaveEr
 
 /// stem of an account save, with or without the rotation suffix
 fn is_account_save_stem(stem: &str) -> bool {
-    let base = stem.split_once('_').map(|(head, _)| head).unwrap_or(stem);
+    let base = match stem.split_once('_') {
+        Some((base, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|c| c.is_ascii_digit()) =>
+        {
+            base
+        }
+        Some(_) => return false,
+        None => stem,
+    };
     let hex32 = base.len() == 32 && base.chars().all(|c| c.is_ascii_hexdigit());
     let numeric = (10..=20).contains(&base.len()) && base.chars().all(|c| c.is_ascii_digit());
     hex32 || numeric
@@ -42,11 +50,18 @@ pub fn find_save_file(save_data_path: Option<&Path>) -> Option<PathBuf> {
         Some(p) => p.to_path_buf(),
         None => detect_save_data_path()?,
     };
-    if !dir.is_dir() {
-        return None;
-    }
-    let mut saves: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
-        .ok()?
+    account_save_files(&dir)
+        .into_iter()
+        .next()
+        .map(|(_, path)| path)
+}
+
+/// Shared chronological ordering for default selection and account discovery.
+fn account_save_files(dir: &Path) -> Vec<(std::time::SystemTime, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut saves: Vec<_> = entries
         .flatten()
         .filter(|e| {
             e.path()
@@ -61,15 +76,19 @@ pub fn find_save_file(save_data_path: Option<&Path>) -> Option<PathBuf> {
                 .is_some_and(is_account_save_stem)
         })
         .filter_map(|e| {
-            let mtime = e.metadata().ok()?.modified().ok()?;
+            let metadata = e.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            let mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
             Some((mtime, e.path()))
         })
         .collect();
-    saves.sort_by(|a, b| b.0.cmp(&a.0));
-    saves.into_iter().next().map(|(_, p)| p)
+    saves.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    saves
 }
 
-/// one active Rocket League account save selected using the same rules as hebstool.
+/// The newest local save for one Rocket League account.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SaveAccount {
     pub account_id: String,
@@ -111,7 +130,7 @@ fn account_display_names(save_dir: &Path) -> std::collections::HashMap<String, S
             let Some(id) = id_re
                 .captures(line)
                 .and_then(|capture| capture.get(1))
-                .map(|value| value.as_str().to_string())
+                .map(|value| value.as_str().to_ascii_lowercase())
             else {
                 continue;
             };
@@ -131,7 +150,9 @@ fn account_display_names(save_dir: &Path) -> std::collections::HashMap<String, S
     names
 }
 
-/// return one current save per account, preferring base saves over numbered backups.
+/// Return the newest save per account, ordered from newest to oldest.
+/// Names from launch logs are optional labels, never a requirement for discovery.
+/// Generic profile names and historical tournament creator names are not used.
 pub fn find_save_accounts(save_data_path: Option<&Path>) -> Vec<SaveAccount> {
     let Some(dir) = save_data_path
         .map(PathBuf::from)
@@ -139,73 +160,47 @@ pub fn find_save_accounts(save_data_path: Option<&Path>) -> Vec<SaveAccount> {
     else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let account_re = regex::Regex::new(r"^(?:[0-9a-fA-F]{32}|\d{10,20})(?:_\d+)?$")
-        .expect("valid account regex");
-    let numbered_re = regex::Regex::new(r"_\d+$").expect("valid numbered save regex");
-    let mut candidates: std::collections::HashMap<
-        String,
-        Vec<(bool, std::time::SystemTime, PathBuf)>,
-    > = std::collections::HashMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("save"))
-        {
-            continue;
-        }
+    let names = account_display_names(&dir);
+    let mut seen = std::collections::HashSet::new();
+    let mut accounts = Vec::new();
+    for (_, path) in account_save_files(&dir) {
         let stem = path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if !account_re.is_match(stem) {
+        let account_id = stem.split('_').next().unwrap_or(stem).to_ascii_lowercase();
+        if !seen.insert(account_id.clone()) {
             continue;
         }
-        let account_id = numbered_re.replace(stem, "").to_string();
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        candidates.entry(account_id).or_default().push((
-            numbered_re.is_match(stem),
-            modified,
+        let display_name = names
+            .get(&account_id)
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Account ({account_id})"));
+        accounts.push(SaveAccount {
+            account_id,
+            display_name,
             path,
-        ));
+        });
     }
-    let names = account_display_names(&dir);
-    let mut accounts: Vec<_> = candidates
-        .into_iter()
-        .filter_map(|(account_id, mut entries)| {
-            entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-            let (_, _, path) = entries.into_iter().next()?;
-            let short_id: String = account_id.chars().take(8).collect();
-            let display_name = names
-                .get(&account_id)
-                .cloned()
-                .unwrap_or_else(|| format!("Account ({short_id}...)"));
-            Some(SaveAccount {
-                account_id,
-                display_name,
-                path,
-            })
-        })
-        .collect();
-    accounts.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     accounts
 }
 
 /// find the right save data path (steam or epic). tries the running game
 /// first, else picks whichever path has the newest .save.
 pub fn detect_save_data_path() -> Option<PathBuf> {
-    if let Some(rl) = crate::process::find_rocket_league() {
-        return Some(rl.save_data_path);
-    }
-
     let docs = crate::utils::paths::documents_dir()?;
-    newest_save_data_path(&docs)
+    preferred_save_data_path(
+        &docs,
+        crate::process::find_rocket_league().map(|rl| rl.save_data_path),
+    )
+}
+
+fn preferred_save_data_path(docs: &Path, preferred: Option<PathBuf>) -> Option<PathBuf> {
+    preferred
+        .filter(|path| find_save_file(Some(path)).is_some())
+        .or_else(|| newest_save_data_path(docs))
 }
 
 fn newest_save_data_path(docs: &Path) -> Option<PathBuf> {
@@ -234,6 +229,170 @@ mod path_tests {
     use super::*;
 
     #[test]
+    fn latest_save_fallback_uses_rotations_and_recency_instead_of_account_names() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("hebnix-latest-save-{}-{nonce}", std::process::id()));
+        let directory = root.join(SAVE_PATH_EPIC);
+        std::fs::create_dir_all(&directory).unwrap();
+        let account_id = "f514e015f0504d8e9031c262f3d089ac";
+        let older_account = "0123456789abcdef0123456789abcdef";
+        let latest = directory.join(format!("{account_id}_2.save"));
+        for (name, seconds) in [
+            (format!("{account_id}.save"), 1),
+            (format!("{account_id}_1.save"), 2),
+            (format!("{older_account}.save"), 3),
+            (format!("{account_id}_2.save"), 4),
+        ] {
+            let file = std::fs::File::create(directory.join(name)).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        }
+        let accounts = find_save_accounts(Some(&directory));
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].path, latest);
+        assert_eq!(accounts[0].display_name, format!("Account ({account_id})"));
+        assert_eq!(
+            find_save_file(Some(&directory)),
+            Some(accounts[0].path.clone())
+        );
+
+        let logs = root.join("My Games/Rocket League/TAGame/Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("Launch.log"), format!(
+            "-epicuserid={older_account} -epicusername=Aardvark\n-epicuserid={account_id} -epicusername=Its_Official_Jay"
+        )).unwrap();
+        let named = find_save_accounts(Some(&directory));
+        assert_eq!(named[0].path, latest);
+        assert_eq!(named[0].display_name, "Its_Official_Jay");
+        assert_eq!(named[1].display_name, "Aardvark");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fallback_ignores_non_account_files_and_save_directories() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-save-candidates-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = "f514e015f0504d8e9031c262f3d089ac";
+        let expected = root.join(format!("{id}_2.save"));
+        std::fs::write(&expected, b"save").unwrap();
+        for name in [
+            format!("{id}_backup.save"),
+            format!("{id}_.save"),
+            format!("{id}_2.save.bak"),
+            "Settings.save".into(),
+        ] {
+            std::fs::write(root.join(name), b"not an account save").unwrap();
+        }
+        std::fs::create_dir(root.join(format!("{id}_3.save"))).unwrap();
+        assert_eq!(find_save_file(Some(&root)), Some(expected.clone()));
+        let accounts = find_save_accounts(Some(&root));
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].path, expected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotating_saves_are_discoverable_without_launch_logs_or_a_base_save() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-unnamed-save-{}-{nonce}",
+            std::process::id()
+        ));
+        let directory = root.join(SAVE_PATH_EPIC);
+        std::fs::create_dir_all(&directory).unwrap();
+        let account_id = "f514e015f0504d8e9031c262f3d089ac";
+        let first = directory.join(format!("{account_id}_1.save"));
+        let second = directory.join(format!("{account_id}_2.save"));
+        // Discovery uses filenames and modification times, not file contents.
+        for (path, seconds) in [(&first, 1), (&second, 2)] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap();
+        }
+        assert_eq!(find_save_file(Some(&directory)), Some(second.clone()));
+        let accounts = find_save_accounts(Some(&directory));
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].account_id, account_id);
+        assert_eq!(accounts[0].path, second);
+        assert_eq!(accounts[0].display_name, format!("Account ({account_id})"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_platform_save_falls_back_to_existing_account_directory() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-save-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        let steam = root.join(SAVE_PATH_STEAM);
+        let epic = root.join(SAVE_PATH_EPIC);
+        std::fs::create_dir_all(&steam).unwrap();
+        std::fs::write(steam.join("0123456789abcdef0123456789abcdef.save"), b"save").unwrap();
+        assert_eq!(
+            preferred_save_data_path(&root, Some(epic.clone())),
+            Some(steam.clone())
+        );
+        std::fs::create_dir_all(&epic).unwrap();
+        // An existing but empty platform folder must also fall back.
+        assert_eq!(
+            preferred_save_data_path(&root, Some(epic.clone())),
+            Some(steam)
+        );
+        std::fs::write(epic.join("0123456789abcdef0123456789abcdef.save"), b"save").unwrap();
+        assert_eq!(
+            preferred_save_data_path(&root, Some(epic.clone())),
+            Some(epic)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_names_match_hex_ids_case_insensitively() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-save-account-{}-{nonce}",
+            std::process::id()
+        ));
+        let save_dir = root.join(SAVE_PATH_EPIC);
+        let logs = root.join("My Games/Rocket League/TAGame/Logs");
+        std::fs::create_dir_all(&save_dir).unwrap();
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("Launch.log"),
+            "-epicuserid=0123456789ABCDEF0123456789ABCDEF -epicusername=TestPlayer",
+        )
+        .unwrap();
+        let path = save_dir.join("0123456789abcdef0123456789abcdef.save");
+        std::fs::write(&path, b"save").unwrap();
+        let accounts = find_save_accounts(Some(&save_dir));
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].display_name, "TestPlayer");
+        assert_eq!(accounts[0].path, path);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn redirected_documents_support_save_discovery_reading_and_writing() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -242,6 +401,13 @@ mod path_tests {
         let root =
             std::env::temp_dir().join(format!("hebnix-save-path-{}-{nonce}", std::process::id()));
         let docs = root.join("OneDrive/Documents");
+        let logs = docs.join("My Games/Rocket League/TAGame/Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("Launch.log"),
+            "-epicuserid=0123456789abcdef0123456789abcdef -epicusername=TestPlayer",
+        )
+        .unwrap();
         let raw = RawSave {
             source_file: String::new(),
             encrypted_size: 0,
@@ -266,6 +432,18 @@ mod path_tests {
             assert!(detected.starts_with(&docs));
             assert_eq!(find_save_file(Some(&directory)), Some(path.clone()));
             assert_eq!(find_save_accounts(Some(&directory))[0].path, path);
+            // Missing log names must not hide otherwise discoverable saves.
+            let unnamed = directory.join("fedcba9876543210fedcba9876543210.save");
+            assemble_savedata(&raw, &unnamed).unwrap();
+            let accounts = find_save_accounts(Some(&directory));
+            assert_eq!(accounts.len(), 2);
+            assert!(
+                accounts
+                    .iter()
+                    .any(|account| account.display_name == "TestPlayer")
+            );
+            assert!(accounts.iter().any(|account| account.path == unnamed
+                && account.display_name == "Account (fedcba9876543210fedcba9876543210)"));
             let mut parsed = parse_savedata(&path, true).unwrap();
             parsed.engine_version = 2;
             assemble_savedata(&parsed, &path).unwrap();

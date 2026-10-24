@@ -1158,6 +1158,75 @@ pub(crate) fn append_names(
     Ok(())
 }
 
+/// A body swap carries the donor's boost layout along with its geometry. The
+/// ProductAsset selects the emitter sockets; the skeletal mesh holds their
+/// references and bone transforms; socket exports hold the position/rotation.
+/// Keep these together, including single/dual emitters and ambient exhaust.
+pub(crate) fn verify_body_boost_layout(
+    donor: &crate::patcher::upk_package::UpkPackage,
+    swapped: &crate::patcher::upk_package::UpkPackage,
+) -> Result<(), String> {
+    use crate::patcher::upk_package::strip;
+    if !donor
+        .exports
+        .iter()
+        .any(|e| strip(&donor.class_of(e)) == "ProductAsset_Body_TA")
+    {
+        return Ok(());
+    }
+    if donor.exports.len() != swapped.exports.len() {
+        return Err("Body swap changed the donor's boost attachment exports".into());
+    }
+    for before in &donor.exports {
+        let class = donor.class_of(before);
+        if !matches!(
+            strip(&class),
+            "ProductAsset_Body_TA" | "SkeletalMesh" | "SkeletalMeshSocket"
+        ) {
+            continue;
+        }
+        let after = &swapped.exports[before.table_index];
+        // The main ProductAsset can move to the target package group. Mesh and
+        // socket ownership must still follow the donor's original references.
+        if before.class_index != after.class_index
+            || (strip(&class) != "ProductAsset_Body_TA" && before.outer_index != after.outer_index)
+            || donor.image[before.serial_offset..before.serial_offset + before.serial_size]
+                != swapped.image[after.serial_offset..after.serial_offset + after.serial_size]
+        {
+            return Err(format!(
+                "Body swap did not preserve the donor's boost layout ({class}, export {})",
+                before.table_index
+            ));
+        }
+        for prop in donor.serialized_props(before)?.0 {
+            let at = before.serial_offset + prop.value_offset;
+            let name_offsets =
+                if strip(&class) == "SkeletalMeshSocket" && prop.tag_type == "NameProperty" {
+                    vec![at]
+                } else if prop.name == "BoostEmitterSockets" && prop.tag_type == "ArrayProperty" {
+                    let count = usize::try_from(donor.read_int(at)?)
+                        .map_err(|_| "Negative boost emitter count")?;
+                    if count.checked_mul(8).and_then(|n| n.checked_add(4)) != Some(prop.size) {
+                        return Err("Invalid body boost emitter sockets".into());
+                    }
+                    (0..count).map(|i| at + 4 + i * 8).collect()
+                } else {
+                    Vec::new()
+                };
+            for offset in name_offsets {
+                let index = usize::try_from(donor.read_int(offset)?)
+                    .map_err(|_| "Invalid boost attachment name")?;
+                if donor.names.get(index).is_none()
+                    || donor.names.get(index) != swapped.names.get(index)
+                {
+                    return Err("Body swap changed a boost socket or bone name".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn patch_for_target(
     source: &Path,
     target_backup: &Path,
@@ -1176,6 +1245,9 @@ pub fn patch_for_target(
     let candidates = keys(base_dir);
     let (mut decrypted, source_key, old_encrypted_size) =
         find_key_and_decrypt(&raw, info, &candidates)?;
+    let has_body = scan_names(&decrypted, info.name_count)?
+        .iter()
+        .any(|entry| entry.name == "ProductAsset_Body_TA");
     let target_raw =
         fs::read(target_backup).map_err(|error| format!("{}: {error}", target_backup.display()))?;
     let target_info = read_info(&target_raw)?;
@@ -1394,8 +1466,184 @@ pub fn patch_for_target(
         let _ = fs::remove_file(&temp_path);
         return Err(error);
     }
+    if has_body {
+        let validation = (|| {
+            let donor = crate::patcher::upk_package::UpkPackage::load(source)?;
+            let swapped = crate::patcher::upk_package::UpkPackage::load(&temp_path)?;
+            verify_body_boost_layout(&donor, &swapped)
+        })();
+        if let Err(error) = validation {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    }
     let result = fs::copy(&temp_path, destination)
         .map_err(|error| format!("Failed to install {}: {error}", destination.display()));
     let _ = fs::remove_file(&temp_path);
     result.map(|_| ())
+}
+
+/// Extend the real import table, preserving all existing indices. New imported
+/// material references let one ProductAsset change without replacing its peers.
+pub fn extend_asset_imports(
+    source: &Path,
+    destination: &Path,
+    base_dir: &Path,
+    additional_names: &[String],
+    objects: &[(String, String, String)],
+) -> Result<(), String> {
+    use std::collections::HashMap;
+    let mut raw = fs::read(source).map_err(|e| e.to_string())?;
+    let info = read_info(&raw)?;
+    if info.licensee_version < 22 {
+        return Err("Asset imports require current Rocket League packages".into());
+    }
+    let candidates = keys(base_dir);
+    let (original, key, _) = find_key_and_decrypt(&raw, info, &candidates)?;
+    let entries = scan_names(&original, info.name_count)?;
+    let insert = entries
+        .last()
+        .map(|entry| entry.offset + 4 + entry.len + 8)
+        .ok_or("Missing name table")?;
+    let mut names: HashMap<String, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.name.clone(), i))
+        .collect();
+    let mut encoded_names = Vec::new();
+    let mut next_name_index = info.name_count;
+    let mut name_index = |name: &str| -> Result<usize, String> {
+        if let Some(index) = names.get(name) {
+            return Ok(*index);
+        }
+        if name.is_empty() || !name.is_ascii() || name.len() > 500 {
+            return Err("Unsupported imported asset name".into());
+        }
+        let index = next_name_index;
+        next_name_index += 1;
+        names.insert(name.to_string(), index);
+        encoded_names.extend_from_slice(&((name.len() + 1) as i32).to_le_bytes());
+        encoded_names.extend_from_slice(name.as_bytes());
+        encoded_names.push(0);
+        encoded_names.extend_from_slice(&0u64.to_le_bytes());
+        Ok(index)
+    };
+    for name in additional_names {
+        name_index(name)?;
+    }
+    let exports = exported_names(&original, info)?;
+    let mut paths = HashMap::new();
+    for index in 0..info.import_count {
+        paths.insert(
+            object_path(&original, info, &exports, -(index as i32 + 1))?.to_ascii_lowercase(),
+            -(index as i32 + 1),
+        );
+    }
+    let table_start = info
+        .import_offset
+        .checked_sub(info.name_offset)
+        .ok_or("Invalid import table")?;
+    let mut table = original
+        .get(table_start..table_start + info.import_count * 28)
+        .ok_or("Truncated import table")?
+        .to_vec();
+    let mut count = info.import_count;
+    for (path, class_package, class_name) in objects {
+        let parts: Vec<_> = path.split('.').collect();
+        if parts.len() < 2 {
+            return Err("External asset requires a package-qualified path".into());
+        }
+        let mut parent = 0i32;
+        for (i, part) in parts.iter().enumerate() {
+            let prefix = parts[..=i].join(".").to_ascii_lowercase();
+            if let Some(index) = paths.get(&prefix) {
+                parent = *index;
+                continue;
+            }
+            let leaf = i + 1 == parts.len();
+            let package = name_index(if leaf { class_package } else { "Core" })?;
+            let class = name_index(if leaf { class_name } else { "Package" })?;
+            let object = name_index(part)?;
+            for index in [package, class] {
+                table.extend_from_slice(&(index as i32).to_le_bytes());
+                table.extend_from_slice(&0i32.to_le_bytes());
+            }
+            table.extend_from_slice(&parent.to_le_bytes());
+            table.extend_from_slice(&(object as i32).to_le_bytes());
+            table.extend_from_slice(&0i32.to_le_bytes());
+            count += 1;
+            parent = -(count as i32);
+            paths.insert(prefix, parent);
+        }
+    }
+    drop(name_index);
+    if count == info.import_count && encoded_names.is_empty() {
+        if source != destination {
+            fs::copy(source, destination).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    let delta = i32::try_from(encoded_names.len() + table.len())
+        .map_err(|_| "Import table growth overflow")?;
+    if let Some(rebased) = rebase_texture_bulk(source, delta)? {
+        raw = rebased;
+    }
+    let (mut header, _, old_encoded) = find_key_and_decrypt(&raw, info, &candidates)?;
+    let mut inserted = encoded_names.clone();
+    inserted.extend_from_slice(&table);
+    header.splice(insert..insert, inserted);
+    let new_count = next_name_index;
+    write_i32(&mut raw, 25, new_count as i32)?;
+    if let Some(offset) = info.generation_name_count_offset {
+        write_i32(&mut raw, offset, new_count as i32)?;
+    }
+    apply_deltas(&mut raw, &mut header, info, delta)?;
+    write_i32(&mut raw, 41, count as i32)?;
+    write_i32(
+        &mut raw,
+        45,
+        (info.name_offset + insert + encoded_names.len()) as i32,
+    )?;
+    let (old_plain, _) = encrypted_size(info)?;
+    let plain = old_plain
+        .checked_add(delta as usize)
+        .ok_or("Header size overflow")?;
+    let encoded = if info.package_flags & 0x0800 != 0 {
+        plain
+    } else {
+        plain.div_ceil(16) * 16
+    };
+    header.resize(encoded, 0);
+    let encrypted = crypt_for_info(&header[..encoded], &key, true, info)?;
+    let mut output = raw[..info.name_offset].to_vec();
+    output.extend_from_slice(&encrypted);
+    output.extend_from_slice(&raw[info.name_offset + old_encoded..]);
+    fs::write(destination, output).map_err(|e| e.to_string())
+}
+
+/// Give each editable decal its own carrier package and package GUID.
+pub fn create_decal_carrier(
+    source: &Path,
+    destination: &Path,
+    base_dir: &Path,
+    source_asset: &str,
+    target_asset: &str,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let mut template = fs::read(source).map_err(|e| e.to_string())?;
+    let info = read_info(&template)?;
+    let guid = Sha256::digest(target_asset.as_bytes());
+    template[info.package_guid_offset..info.package_guid_offset + 16].copy_from_slice(&guid[..16]);
+    let temporary = destination.with_extension("carrier-template.tmp");
+    fs::write(&temporary, template).map_err(|e| e.to_string())?;
+    let result = patch_for_target(
+        source,
+        &temporary,
+        destination,
+        base_dir,
+        Some(source_asset),
+        Some(target_asset),
+    );
+    let _ = fs::remove_file(temporary);
+    result
 }

@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+
+use crate::background_cache::BackgroundCache;
 
 use serde_json::Value;
 
 use super::bindings::is_bind_pressed;
 
+#[derive(Clone)]
 struct ActionBindingCache {
-    checked_at: Option<Instant>,
     path: Option<PathBuf>,
     modified: Option<SystemTime>,
     ini_modified: Option<SystemTime>,
@@ -25,7 +27,6 @@ struct ActionBindingCache {
 impl Default for ActionBindingCache {
     fn default() -> Self {
         Self {
-            checked_at: None,
             path: None,
             modified: None,
             ini_modified: None,
@@ -76,9 +77,21 @@ fn collect_chat_binds(raw: &Value, output: &mut HashMap<&'static str, String>) {
     }
 }
 
-fn cache() -> &'static Mutex<ActionBindingCache> {
-    static CACHE: OnceLock<Mutex<ActionBindingCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(ActionBindingCache::default()))
+fn cache() -> &'static BackgroundCache<ActionBindingCache> {
+    static CACHE: OnceLock<BackgroundCache<ActionBindingCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut state = ActionBindingCache::default();
+        BackgroundCache::new(
+            "rl-action-bindings",
+            ActionBindingCache::default(),
+            Duration::from_secs(2),
+            move |force| refresh_cache(&mut state, force).then(|| state.clone()),
+        )
+    })
+}
+
+pub(crate) fn init_action_bind_cache() {
+    let _ = cache();
 }
 
 fn normalise_action(action: &str) -> String {
@@ -277,15 +290,7 @@ fn current_save_path() -> Option<PathBuf> {
     })
 }
 
-fn refresh_cache(cache: &mut ActionBindingCache) {
-    if cache
-        .checked_at
-        .is_some_and(|checked| checked.elapsed() < Duration::from_secs(2))
-    {
-        return;
-    }
-    cache.checked_at = Some(Instant::now());
-
+fn refresh_cache(cache: &mut ActionBindingCache, force: bool) -> bool {
     let path = current_save_path();
     let modified = path
         .as_ref()
@@ -295,8 +300,12 @@ fn refresh_cache(cache: &mut ActionBindingCache) {
         .and_then(|metadata| metadata.modified())
         .ok();
 
-    if path == cache.path && modified == cache.modified && ini_modified == cache.ini_modified {
-        return;
+    if !force
+        && path == cache.path
+        && modified == cache.modified
+        && ini_modified == cache.ini_modified
+    {
+        return false;
     }
 
     let mut keyboard = HashMap::new();
@@ -332,16 +341,13 @@ fn refresh_cache(cache: &mut ActionBindingCache) {
     cache.ui_scale = ui_scale;
     cache.bindings = bindings;
     cache.chat_binds = chat_binds;
+    true
 }
 
-/// options > interface > UIScale, 1.0 when the save never wrote it. rides the
-/// bind cache, the save is already loaded there and rl rewrites it as it plays
+/// options > interface > UIScale, 1.0 until the background snapshot is ready or
+/// when the save never wrote it. Shares the input binding worker's decoded save.
 pub fn ui_scale() -> f64 {
-    let Ok(mut cache) = cache().lock() else {
-        return 1.0;
-    };
-    refresh_cache(&mut cache);
-    cache.ui_scale
+    cache().snapshot().ui_scale
 }
 
 /// Keyboard key bound to a text chat channel ("global", "team" or "party"),
@@ -355,23 +361,18 @@ pub fn chat_channel_bind(channel: &str) -> String {
         "party" => "u",
         _ => "t",
     };
-    let Ok(mut cache) = cache().lock() else {
-        return default.into();
-    };
-    refresh_cache(&mut cache);
-    cache
+    cache()
+        .snapshot()
         .chat_binds
         .get(channel)
         .cloned()
         .unwrap_or_else(|| default.into())
 }
 
+/// Latest binding snapshot; empty until the first background load completes.
 pub fn action_binds(action: &str) -> Vec<String> {
-    let Ok(mut cache) = cache().lock() else {
-        return Vec::new();
-    };
-    refresh_cache(&mut cache);
-    cache
+    cache()
+        .snapshot()
         .bindings
         .get(&normalise_action(action))
         .cloned()
@@ -384,8 +385,7 @@ pub fn is_action_pressed(action: &str) -> bool {
         .any(|binding| is_bind_pressed(binding))
 }
 
+/// Schedule a forced reload, retaining the previous bindings until it finishes.
 pub fn clear_action_bind_cache() {
-    if let Ok(mut cache) = cache().lock() {
-        *cache = ActionBindingCache::default();
-    }
+    cache().refresh();
 }

@@ -6,9 +6,24 @@ use std::path::Path;
 use eframe::egui::{self, Color32};
 use serde::Deserialize;
 
+mod presentation;
+pub use presentation::*;
+
 /// a user theme file, see examples/themes/ for the format
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ThemeFile {
+    /// Absent/1 keeps the original renderer. New presentation is opt-in only.
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub layout: ThemeLayout,
+    #[serde(default)]
+    pub typography: ThemeTypography,
+    #[serde(default)]
+    pub components: ThemeComponents,
+    #[serde(default)]
+    pub pages: ThemePages,
+    #[serde(default)]
+    pub assets: ThemeAssets,
     #[serde(default)]
     pub base: String,
     #[serde(default)]
@@ -107,27 +122,47 @@ fn find_font_file(fonts_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
 /// switches the app's font to whatever's in fonts_dir. falls back to the
 /// default font if nothing's set or the file isn't there.
 pub fn apply_font(ctx: &egui::Context, fonts_dir: &Path, font_name: Option<&str>) {
+    ctx.set_fonts(theme_fonts(fonts_dir, font_name, false));
+}
+
+#[cfg(test)]
+mod bundled_font_tests {
+    use super::*;
+    #[test]
+    fn bundled_font_is_opt_in_and_legacy_missing_fonts_keep_defaults() {
+        let missing=Path::new("this-directory-does-not-exist");
+        let modern=theme_fonts(missing,Some("Barlow-Medium"),true);
+        assert_eq!(modern.families[&egui::FontFamily::Proportional][0],"Barlow-Medium");
+        assert_eq!(modern.font_data["Barlow-Medium"].font.as_ref(),include_bytes!("../../../examples/fonts/Barlow-Medium.ttf"));
+        assert!(!theme_fonts(missing,Some("Barlow-Medium"),false).font_data.contains_key("Barlow-Medium"));
+        assert!(!theme_fonts(missing,None,true).font_data.contains_key("Barlow-Medium"));
+    }
+}
+
+fn theme_fonts(fonts_dir: &Path, font_name: Option<&str>, bundled: bool) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
 
     if let Some(name) = font_name {
-        if let Some(path) = find_font_file(fonts_dir, name) {
-            if let Ok(bytes) = std::fs::read(&path) {
+        let data = find_font_file(fonts_dir, name).and_then(|path| std::fs::read(path).ok())
+            .map(egui::FontData::from_owned)
+            .or_else(|| (bundled && name.eq_ignore_ascii_case("Barlow-Medium")).then(||
+                egui::FontData::from_static(include_bytes!("../../../examples/fonts/Barlow-Medium.ttf"))));
+        if let Some(data) = data {
                 fonts
                     .font_data
-                    .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
+                    .insert(name.to_owned(), data.into());
                 fonts
                     .families
                     .entry(egui::FontFamily::Proportional)
                     .or_default()
                     .insert(0, name.to_owned());
-            }
         }
     }
 
     // glyph fallbacks for the active language go last, behind the theme font
     crate::i18n::fonts::add_fallbacks(&mut fonts);
 
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -177,6 +212,7 @@ fn apply_widget_state(target: &mut egui::style::WidgetVisuals, source: &ThemeWid
 
 fn parse_color(s: &str) -> Option<Color32> {
     let s = s.trim().trim_start_matches('#');
+    if !s.is_ascii() { return None; }
     let bytes = match s.len() {
         6 => {
             let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -230,6 +266,7 @@ fn muted_light_visuals() -> egui::Visuals {
 /// with_transparent(true).
 pub fn apply_window_opacity(ctx: &egui::Context, opacity: f32) {
     let o = opacity.clamp(0.5, 1.0);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("hebnix.theme.opacity"), o));
     if o >= 0.995 {
         return;
     }
@@ -278,6 +315,15 @@ pub fn apply_theme(
     fonts_dir: &Path,
     name: &str,
 ) -> Result<(), String> {
+    // Validate before touching the context, so a failed theme cannot half-apply.
+    let loaded = if name == "Dark" || name == "Light" {
+        None
+    } else {
+        let text = std::fs::read_to_string(themes_dir.join(format!("{name}.toml")))
+            .map_err(|e| format!("Theme file '{name}.toml' is missing: {e}"))?;
+        Some(parse_theme(&text)?)
+    };
+    prepare_presentation(ctx, loaded.as_ref(), themes_dir)?;
     match name {
         "Dark" => {
             ctx.set_theme(egui::Theme::Dark);
@@ -292,11 +338,7 @@ pub fn apply_theme(
             Ok(())
         }
         _ => {
-            let path = themes_dir.join(format!("{name}.toml"));
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("Theme file '{name}.toml' is missing: {e}"))?;
-            let theme: ThemeFile =
-                toml::from_str(&text).map_err(|e| format!("Theme '{name}' is invalid: {e}"))?;
+            let theme = loaded.as_ref().expect("user theme was loaded above");
 
             let (base_theme, mut visuals) = if theme.base.eq_ignore_ascii_case("light") {
                 (egui::Theme::Light, muted_light_visuals())
@@ -446,7 +488,8 @@ pub fn apply_theme(
                     style.animation_time = value.max(0.0);
                 }
             });
-            apply_font(ctx, fonts_dir, theme.font.as_deref());
+            ctx.set_fonts(theme_fonts(fonts_dir, theme.font.as_deref(), theme.schema_version == Some(2)));
+            apply_presentation_style(ctx, theme);
             Ok(())
         }
     }

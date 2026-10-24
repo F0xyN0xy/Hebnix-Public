@@ -336,6 +336,9 @@ pub struct TitleSpoofSettings {
     pub text: String,
     pub color: String,
     pub glow: bool,
+    /// Older settings used the text colour for the halo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow_color: Option<String>,
     pub target_id: Option<String>,
 }
 
@@ -456,7 +459,9 @@ impl Rule for TitleRule {
                     "Color": spoof.color,
                 });
                 if spoof.glow {
-                    replacement["GlowColor"] = replacement["Color"].clone();
+                    replacement["GlowColor"] = serde_json::Value::String(
+                        spoof.glow_color.as_ref().unwrap_or(&spoof.color).clone(),
+                    );
                 }
                 if let Some(category) = categories.iter_mut().find(|category| {
                     category.get("ID").and_then(serde_json::Value::as_str)

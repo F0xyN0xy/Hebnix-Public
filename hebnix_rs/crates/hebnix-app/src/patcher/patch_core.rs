@@ -228,6 +228,9 @@ pub mod upk {
 
     pub const UPK_MAGIC: u32 = 2653586369; // 0x9E2A83C1
     const VALID_BLK_SZ: [u32; 6] = [32768, 65536, 131072, 262144, 524288, 1048576];
+    // Matches the package loader's logical-image limit. Relocated movie exports
+    // can legitimately grow the final chunk beyond the old 50 MB heuristic.
+    pub const MAX_CHUNK_SIZE: u32 = 512 * 1024 * 1024;
 
     #[derive(Debug)]
     pub enum UpkError {
@@ -297,7 +300,10 @@ pub mod upk {
         file_bytes: &[u8],
         chunk_pos: usize,
     ) -> Result<(Vec<u8>, u32, usize), UpkError> {
-        if chunk_pos + 16 > file_bytes.len() {
+        if chunk_pos
+            .checked_add(16)
+            .is_none_or(|end| end > file_bytes.len())
+        {
             return Err(UpkError::OutOfBounds);
         }
 
@@ -309,33 +315,54 @@ pub mod upk {
         let blk_sz = read_u32(file_bytes, chunk_pos + 4);
         let unc_tot = read_u32(file_bytes, chunk_pos + 12);
 
-        if !VALID_BLK_SZ.contains(&blk_sz) || unc_tot <= 1 || unc_tot >= 50_000_000 {
+        if !VALID_BLK_SZ.contains(&blk_sz) || unc_tot == 0 {
             return Err(UpkError::InvalidBlockSize);
         }
+        if unc_tot > MAX_CHUNK_SIZE {
+            return Err(UpkError::OversizedChunk);
+        }
 
-        let length = ((unc_tot + blk_sz - 1) / blk_sz) as usize;
+        let length = unc_tot.div_ceil(blk_sz) as usize;
         let header_end = chunk_pos + 16 + length * 8;
 
         if header_end > file_bytes.len() {
             return Err(UpkError::OutOfBounds);
         }
 
-        let mut block_sizes = Vec::with_capacity(length);
-        for i in 0..length {
-            block_sizes.push(read_u32(file_bytes, chunk_pos + 16 + i * 8) as usize);
-        }
+        let compressed_end = header_end
+            .checked_add(read_u32(file_bytes, chunk_pos + 8) as usize)
+            .filter(|end| *end <= file_bytes.len())
+            .ok_or(UpkError::OutOfBounds)?;
 
         let mut decompressed = Vec::with_capacity(unc_tot as usize);
         let mut offset = header_end;
 
-        for size in block_sizes {
-            if offset + size > file_bytes.len() {
-                return Err(UpkError::OutOfBounds);
+        for i in 0..length {
+            let size = read_u32(file_bytes, chunk_pos + 16 + i * 8) as usize;
+            let declared = read_u32(file_bytes, chunk_pos + 20 + i * 8);
+            let expected = blk_sz.min(unc_tot - i as u32 * blk_sz);
+            if size == 0 || declared != expected {
+                return Err(UpkError::InvalidBlockSize);
             }
-            let dec = zlib_decompress(&file_bytes[offset..offset + size])
+            let end = offset
+                .checked_add(size)
+                .filter(|end| *end <= compressed_end)
+                .ok_or(UpkError::OutOfBounds)?;
+            // Bound each inflate operation too: malformed data must not expand
+            // beyond its declared block size, even inside an allowed chunk.
+            let mut dec = Vec::with_capacity(expected as usize);
+            ZlibDecoder::new(&file_bytes[offset..end])
+                .take(expected as u64 + 1)
+                .read_to_end(&mut dec)
                 .map_err(|_| UpkError::DecompressionFailed)?;
+            if dec.len() != expected as usize {
+                return Err(UpkError::DecompressionFailed);
+            }
             decompressed.extend_from_slice(&dec);
-            offset += size;
+            offset = end;
+        }
+        if offset != compressed_end {
+            return Err(UpkError::InvalidBlockSize);
         }
 
         Ok((decompressed, blk_sz, offset))

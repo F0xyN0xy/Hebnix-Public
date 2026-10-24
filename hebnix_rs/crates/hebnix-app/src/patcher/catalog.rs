@@ -27,6 +27,7 @@ pub(crate) struct PatchCatalog {
     preview_page: HashMap<String, usize>,
     busy: HashSet<String>,
     page: usize,
+    last_query: String,
     status: String,
     fetched: bool,
     fetching: bool,
@@ -59,6 +60,7 @@ impl PatchCatalog {
             preview_page: HashMap::new(),
             busy: HashSet::new(),
             page: 0,
+            last_query: String::new(),
             status,
             fetched: false,
             fetching: false,
@@ -139,7 +141,6 @@ impl PatchCatalog {
         query: &str,
         ctx: &egui::Context,
         logs: &Sender<AppMsg>,
-        columns: usize,
     ) -> Option<PathBuf> {
         if !self.fetched {
             self.refresh(ctx);
@@ -158,6 +159,10 @@ impl PatchCatalog {
             self.page = 0;
         }
         let query = query.trim().to_lowercase();
+        if query != self.last_query {
+            self.page = 0;
+            self.last_query = query.clone();
+        }
         let matches: Vec<usize> = self
             .items
             .iter()
@@ -169,29 +174,9 @@ impl PatchCatalog {
             })
             .map(|(i, _)| i)
             .collect();
-        // Keep the same items on the current page when responsive columns change.
-        let page_size = if self.kind == "decal" { 12 } else { 16 };
-        let pages = matches.len().div_ceil(page_size).max(1);
-        self.page = self.page.min(pages - 1);
-        ui.horizontal(|ui| {
-            ui.label(if matches.is_empty() {
-                self.status.clone()
-            } else {
-                format!("Page {} of {pages}", self.page + 1)
-            });
-            if ui
-                .add_enabled(self.page > 0, egui::Button::new(t("ball-previous")))
-                .clicked()
-            {
-                self.page -= 1;
-            }
-            if ui
-                .add_enabled(self.page + 1 < pages, egui::Button::new(t("ball-next")))
-                .clicked()
-            {
-                self.page += 1;
-            }
-        });
+        let columns = crate::ui::browser::columns(ui, 224.0);
+        let page_size = columns * crate::ui::browser::ROWS;
+        crate::ui::browser::pagination(ui, &mut self.page, matches.len(), page_size);
         let visible: Vec<_> = matches
             .into_iter()
             .skip(self.page * page_size)
@@ -561,4 +546,83 @@ fn title(value: &str) -> String {
     c.next()
         .map(|x| x.to_uppercase().collect::<String>() + c.as_str())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod browser_layout_tests {
+    use super::*;
+
+    #[test]
+    fn patch_catalog_browser_keeps_cards_and_three_responsive_rows() {
+        let root =
+            std::env::temp_dir().join(format!("hebnix-patch-browser-{}", rand::random::<u64>()));
+        let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
+        for theme in ["Dark", "Ocean Studio Dark"] {
+            for kind in ["ball", "boost", "decal", "car"] {
+                for (width, columns) in [(600.0, 2), (834.0, 3), (1034.0, 4), (1530.0, 6)] {
+                    let ctx = egui::Context::default();
+                    crate::theme::apply_theme(&ctx, &themes, &themes, theme).unwrap();
+                    let mut catalog = PatchCatalog::new(&root, kind);
+                    catalog.fetched = true;
+                    catalog.items = (0..40).map(|i| serde_json::json!({"id":format!("patch-{i}"),"name":format!("Patch {i}"),"author":"Test author","banner_path":"","download_count":12,"is_pack":true})).collect();
+                    std::fs::write(catalog.zip("patch-0"), b"fixture").unwrap();
+                    let (logs, _rx) = crossbeam_channel::unbounded();
+                    let draw = |catalog: &mut PatchCatalog, query: &str| {
+                        let mut output = egui::FullOutput::default();
+                        for _ in 0..2 {
+                            output = ctx.run_ui(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        egui::vec2(width, 1000.0),
+                                    )),
+                                    ..Default::default()
+                                },
+                                |ui| {
+                                    egui::CentralPanel::default().show(ui, |ui| {
+                                        assert!(catalog.render(ui, query, &ctx, &logs).is_none());
+                                        assert!(
+                                            ui.min_rect().right() <= width + 1.0,
+                                            "{kind} exceeds pane width"
+                                        );
+                                    });
+                                },
+                            );
+                        }
+                        output
+                    };
+                    fn text(shape: &egui::Shape, needle: &str) -> bool {
+                        match shape {
+                            egui::Shape::Text(t) => t.galley.text().contains(needle),
+                            egui::Shape::Vec(v) => v.iter().any(|s| text(s, needle)),
+                            _ => false,
+                        }
+                    }
+                    let output = draw(&mut catalog, "");
+                    let summary = format!("Page 1 of {}", 40_usize.div_ceil(columns * 3));
+                    assert!(
+                        output.shapes.iter().any(|s| text(&s.shape, &summary)),
+                        "{theme}/{kind}/{width}"
+                    );
+                    for content in ["Patch 0", "Test author", "PACK", &t("card-import")] {
+                        assert!(
+                            output.shapes.iter().any(|s| text(&s.shape, content)),
+                            "Missing card content {content}"
+                        );
+                    }
+                    catalog.page = 2;
+                    catalog.view_downloaded = true;
+                    draw(&mut catalog, "");
+                    assert_eq!(catalog.page, 0);
+                    catalog.view_downloaded = false;
+                    let output = draw(&mut catalog, "absent");
+                    assert!(output.shapes.iter().any(|s| text(&s.shape, "(0 items)")));
+                }
+            }
+        }
+        let resolved = root.canonicalize().unwrap();
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        assert!(resolved.starts_with(&temp) && resolved != temp);
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
 }
