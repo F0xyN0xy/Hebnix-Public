@@ -12,7 +12,6 @@ tab-patcher = Items
 tab-colours = Farben
 tab-settings = Einstellungen
 tab-plugins = Plugins
-tab-rlapi = Experimentell
 tab-about = Info
 
 btn-browse = Durchsuchen

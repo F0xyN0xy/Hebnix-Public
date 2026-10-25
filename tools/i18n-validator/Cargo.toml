@@ -1,0 +1,16 @@
+
+[package]
+name = "hebnix-i18n-validator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep this tool independent from the parent Hebnix workspace.
+[workspace]
+
+[dependencies]
+fluent-syntax = "0.12"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

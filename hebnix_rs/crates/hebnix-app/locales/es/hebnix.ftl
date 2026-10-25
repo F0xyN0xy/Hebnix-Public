@@ -11,7 +11,6 @@ tab-patcher = Objetos
 tab-colours = Colores
 tab-settings = Ajustes
 tab-plugins = Plugins
-tab-rlapi = Experimental
 tab-about = Acerca de
 btn-browse = Examinar
 btn-refresh = Actualizar
