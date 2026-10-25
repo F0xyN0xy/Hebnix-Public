@@ -22,7 +22,48 @@ use crate::spoofer::rules::{NameRule, Rule, TitleSpoofSettings};
 use http::HttpProxy;
 
 pub const PROXY_HOST: &str = "127.0.0.1";
-pub const PROXY_PORT: u16 = 8080;
+/// HTTP proxy ports, tried in order. A fixed 8080 often clashes with
+/// steamwebhelper and local dev servers; 0 lets the OS pick a free port as
+/// the last resort.
+pub const PROXY_PORTS: &[u16] = &[6969, 143, 6970, 6971, 6972, 6973, 0];
+
+/// bind the first free port of `ports` on PROXY_HOST
+pub(crate) fn bind_local(what: &str, ports: &[u16]) -> Result<std::net::TcpListener, String> {
+    let mut last_error = None;
+    for &port in ports {
+        match std::net::TcpListener::bind((PROXY_HOST, port)) {
+            Ok(listener) => {
+                if let Ok(address) = listener.local_addr() {
+                    tracing::info!("{what} listening on {address}");
+                }
+                return Ok(listener);
+            }
+            Err(error) => {
+                tracing::debug!("{what}: {PROXY_HOST}:{port} unavailable: {error}");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(format!(
+        "Cannot bind {what}: {}",
+        last_error.map_or_else(|| "no ports to try".to_string(), |e| e.to_string())
+    ))
+}
+
+fn proxy_server(port: u16) -> String {
+    format!("http={PROXY_HOST}:{port};https={PROXY_HOST}:{port}")
+}
+
+/// is `server` a proxy setting Hebnix wrote, on any port? Older versions
+/// wrote a bare `127.0.0.1:8080`.
+fn is_hebnix_proxy_server(server: &str) -> bool {
+    let port = server
+        .strip_prefix(&format!("http={PROXY_HOST}:"))
+        .and_then(|rest| rest.split_once(';'))
+        .and_then(|(port, _)| port.parse::<u16>().ok());
+    port.is_some_and(|port| server == proxy_server(port))
+        || server == format!("{PROXY_HOST}:8080")
+}
 pub const MAX_NAME_LENGTH: usize = 32;
 pub const WEBSOCKET_UNAVAILABLE: &str = "WebSocket proxy features are unavailable.";
 
@@ -146,10 +187,10 @@ fn restore_legacy_hebnix_proxy(base_dir: &Path) {
         return;
     }
     let current = read_current_proxy();
-    let ours = format!("{PROXY_HOST}:{PROXY_PORT}");
-    let explicit = format!("http={ours};https={ours}");
-    let legacy_hebnix_proxy = current.proxy_server.as_deref() == Some(&ours)
-        || current.proxy_server.as_deref() == Some(&explicit);
+    let legacy_hebnix_proxy = current
+        .proxy_server
+        .as_deref()
+        .is_some_and(is_hebnix_proxy_server);
     if legacy_hebnix_proxy {
         if let Some(backup) = std::fs::read(&marker)
             .ok()
@@ -352,7 +393,8 @@ impl SpooferManager {
                 })
                 .collect(),
         );
-        let proxy = HttpProxy::start(ca, rules, self.tx.clone())?;
+        let proxy = HttpProxy::start(ca, rules, self.tx.clone(), PROXY_PORTS)?;
+        let port = proxy.port();
         let backup = marker_path(&self.base_dir);
         if backup.exists() {
             proxy.stop();
@@ -372,9 +414,7 @@ impl SpooferManager {
         self.http_active.store(true, Ordering::Release);
         if let Err(error) = apply_proxy(&ProxyBackup {
             proxy_enable: Some(1),
-            proxy_server: Some(format!(
-                "http={PROXY_HOST}:{PROXY_PORT};https={PROXY_HOST}:{PROXY_PORT}"
-            )),
+            proxy_server: Some(proxy_server(port)),
             proxy_override: Some("<local>".into()),
         }) {
             self.http_active.store(false, Ordering::Release);
@@ -386,9 +426,9 @@ impl SpooferManager {
             .http_proxy
             .lock()
             .map_err(|_| "HTTP proxy lock poisoned")? = Some(proxy);
-        let _ = self.tx.send(AppMsg::Log(
-            "[Spoofer] HTTP proxy started. WebSocket proxy is unavailable.".into(),
-        ));
+        let _ = self.tx.send(AppMsg::Log(format!(
+            "[Spoofer] HTTP proxy started on {PROXY_HOST}:{port}. WebSocket proxy is unavailable."
+        )));
         Ok(())
     }
 
@@ -493,6 +533,29 @@ impl SpooferManager {
 #[cfg(test)]
 mod proxy_tests {
     use super::ProxyOptions;
+    #[test]
+    fn busy_ports_fall_back_to_the_next_one() {
+        let taken = std::net::TcpListener::bind((super::PROXY_HOST, 0)).unwrap();
+        let busy = taken.local_addr().unwrap().port();
+        let listener = super::bind_local("test", &[busy, 0]).unwrap();
+        assert_ne!(listener.local_addr().unwrap().port(), busy);
+        assert!(super::bind_local("test", &[busy]).is_err());
+    }
+    #[test]
+    fn hebnix_proxy_settings_are_recognised_on_any_port() {
+        for port in [6969, 143, 8080, 51234] {
+            assert!(super::is_hebnix_proxy_server(&super::proxy_server(port)));
+        }
+        assert!(super::is_hebnix_proxy_server("127.0.0.1:8080"));
+        for other in [
+            "http=127.0.0.1:6969;https=127.0.0.1:7000",
+            "http=10.0.0.1:6969;https=10.0.0.1:6969",
+            "proxy.example.com:3128",
+            "",
+        ] {
+            assert!(!super::is_hebnix_proxy_server(other), "{other}");
+        }
+    }
     #[test]
     fn declined_elevation_disables_http_features_but_preserves_customisation() {
         let unique = std::time::SystemTime::now()

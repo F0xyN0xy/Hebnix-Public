@@ -1,7 +1,7 @@
 //! Explicit HTTP proxy. Only account HTTPS is inspected; other CONNECTs are
 //! forwarded unchanged. No hosts redirects or PsyNet/WebSocket rewriting.
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpStream};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -14,6 +14,7 @@ use super::{ca::Ca, proxy, rules::Rule};
 use crate::messages::AppMsg;
 
 pub struct HttpProxy {
+    port: u16,
     running: Arc<AtomicBool>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -23,9 +24,10 @@ impl HttpProxy {
         ca: Arc<Ca>,
         rules: Arc<Vec<Box<dyn Rule>>>,
         tx: Sender<AppMsg>,
+        ports: &[u16],
     ) -> Result<Self, String> {
-        let listener = TcpListener::bind((super::PROXY_HOST, super::PROXY_PORT))
-            .map_err(|e| format!("Cannot bind HTTP proxy: {e}"))?;
+        let listener = super::bind_local("HTTP proxy", ports)?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let config = proxy::build_server_config(Arc::new(proxy::CertResolver::with_default_host(
             ca,
             "api.epicgames.dev",
@@ -54,9 +56,14 @@ impl HttpProxy {
             })
             .map_err(|e| format!("Cannot start HTTP proxy: {e}"))?;
         Ok(Self {
+            port,
             running,
             worker: Mutex::new(Some(worker)),
         })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn is_running(&self) -> bool {
@@ -71,7 +78,7 @@ impl HttpProxy {
         if !self.running.swap(false, Ordering::AcqRel) {
             return;
         }
-        let _ = TcpStream::connect((super::PROXY_HOST, super::PROXY_PORT));
+        let _ = TcpStream::connect((super::PROXY_HOST, self.port));
         if let Ok(mut worker) = self.worker.lock() {
             if let Some(worker) = worker.take() {
                 let _ = worker.join();
@@ -191,6 +198,7 @@ impl Write for PrefixedStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     fn local_proxy() -> (TcpStream, std::thread::JoinHandle<Result<(), String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
