@@ -2611,6 +2611,24 @@ impl HebnixApp {
                         .on_http_upload_response(&slug, &req_id, status, &body);
                     ctx.request_repaint();
                 }
+                AppMsg::PluginAssetImported {
+                    slug,
+                    req_id,
+                    name,
+                    error,
+                } => {
+                    if let Some(error) = &error {
+                        self.console
+                            .write(format!("[Plugins] {slug}: could not import asset: {error}"));
+                    }
+                    self.plugin_mgr.on_asset_imported(
+                        &slug,
+                        &req_id,
+                        name.as_deref(),
+                        error.as_deref(),
+                    );
+                    ctx.request_repaint();
+                }
                 AppMsg::PluginHttpResult {
                     slug,
                     req_id,
