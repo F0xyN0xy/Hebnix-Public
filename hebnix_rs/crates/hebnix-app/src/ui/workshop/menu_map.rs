@@ -5,10 +5,14 @@ use crate::patcher::menu_map::{
 };
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use eframe::egui;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The BakkesMod plugin that previews camera and car values live in game.
 const MENUCAM_URL: &str = "https://github.com/xplodingeggo/menucam";
+
+/// Where MenuCam saves its export, under %APPDATA%.
+const MENUCAM_EXPORT: &str = "bakkesmod/bakkesmod/data/menucam/hebnix.json";
 
 /// Width of the plugin card beside the settings.
 const PLUGIN_CARD_WIDTH: f32 = 260.0;
@@ -53,7 +57,12 @@ pub struct MenuMapState {
     cameras: Vec<MenuCamera>,
     camera_error: Option<String>,
     camera_on: bool,
-    camera: CameraTweak,
+    /// Each camera's own change, by camera name. Untouched cameras have none.
+    camera_tweaks: BTreeMap<String, CameraTweak>,
+    /// The camera being edited.
+    camera_selected: String,
+    /// The camera last picked on the Other cameras tab.
+    camera_other: String,
     car_spots: Vec<CarSpot>,
     car_on: bool,
     car: CarTweak,
@@ -142,19 +151,36 @@ impl MenuMapState {
             self.car_on = true;
             self.car = tweak;
         }
-        if let Some(tweak) = self.active.as_ref().and_then(|a| a.camera.clone()) {
+        let applied = self
+            .active
+            .as_ref()
+            .map(ActiveSwap::camera_tweaks)
+            .unwrap_or_default();
+        if !applied.is_empty() {
             self.camera_on = true;
-            self.camera = tweak;
+            self.camera_tweaks = applied
+                .into_iter()
+                .map(|tweak| (tweak.camera.clone(), tweak))
+                .collect();
         }
-        if !self.cameras.iter().any(|c| c.name == self.camera.camera) {
-            self.camera = CameraTweak {
-                camera: self
-                    .cameras
-                    .first()
-                    .map(|c| c.name.clone())
-                    .unwrap_or_default(),
-                ..CameraTweak::default()
-            };
+        let play = self.play_camera().map(|c| c.name.clone());
+        if !self.cameras.iter().any(|c| c.name == self.camera_selected) {
+            self.camera_selected = play
+                .clone()
+                .or_else(|| self.cameras.first().map(|c| c.name.clone()))
+                .unwrap_or_default();
+        }
+        if !self
+            .cameras
+            .iter()
+            .any(|c| c.name == self.camera_other && Some(&c.name) != play.as_ref())
+        {
+            self.camera_other = self
+                .cameras
+                .iter()
+                .find(|c| Some(&c.name) != play.as_ref())
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
         }
         if let Some(active) = &self.active {
             if active.label.is_some() {
@@ -210,7 +236,11 @@ impl MenuMapState {
         };
         let custom = custom.map(|map| (map.path.clone(), map.id.clone(), map.name.clone()));
         let tweaks = MenuTweaks {
-            camera: self.camera_on.then(|| self.camera.clone()),
+            cameras: if self.camera_on {
+                self.camera_tweaks.values().cloned().collect()
+            } else {
+                Vec::new()
+            },
             car: self.car_on.then(|| self.car.clone()),
         };
         let tx = tx.clone();
@@ -256,7 +286,7 @@ impl MenuMapState {
         let main_width = ui.available_width() - PLUGIN_CARD_WIDTH - spacing;
         // Narrow windows get the card on top instead of beside the settings.
         if main_width < 420.0 {
-            render_plugin_card(ui);
+            self.render_plugin_card(ui);
             ui.add_space(12.0);
             self.render_settings(ui, rl_path, custom, tx);
             return;
@@ -268,7 +298,7 @@ impl MenuMapState {
             });
             ui.vertical(|ui| {
                 ui.set_width(PLUGIN_CARD_WIDTH);
-                render_plugin_card(ui);
+                self.render_plugin_card(ui);
             });
         });
     }
@@ -442,8 +472,13 @@ impl MenuMapState {
         }
     }
 
-    /// Experimental: move one of the menu level's cameras. Which camera the
-    /// home screen uses isn't known, so the player picks one and tries it.
+    /// The camera used after pressing Play, which gets its own tab.
+    fn play_camera(&self) -> Option<&MenuCamera> {
+        self.cameras.iter().find(|c| c.tag == "MainMenuPlay")
+    }
+
+    /// Experimental: move the menu level's fixed cameras. Each camera keeps
+    /// its own values; the Play menu camera has a tab, the rest share one.
     fn render_camera(&mut self, ui: &mut egui::Ui, ready: bool) {
         ui.collapsing(t("menu-map-camera-title"), |ui| {
             ui.small(t("menu-map-camera-description"));
@@ -464,26 +499,71 @@ impl MenuMapState {
                     }
                     None => format!("{} ({})", camera.tag, camera.name),
                 };
-                let current = self
-                    .cameras
-                    .iter()
-                    .find(|c| c.name == self.camera.camera)
-                    .map(label)
-                    .unwrap_or_default();
-                egui::ComboBox::from_id_salt("menu_map_camera")
-                    .selected_text(current)
-                    .width(360.0)
-                    .show_ui(ui, |ui| {
-                        for camera in &self.cameras {
-                            if ui
-                                .selectable_label(camera.name == self.camera.camera, label(camera))
-                                .clicked()
-                            {
-                                self.camera.camera = camera.name.clone();
-                            }
+                let changed = |name: &str| {
+                    self.camera_tweaks
+                        .get(name)
+                        .is_some_and(|tweak| !tweak.is_noop())
+                };
+                let play = self.play_camera().map(|c| c.name.clone());
+                let on_play = play.as_ref() == Some(&self.camera_selected);
+                ui.horizontal(|ui| {
+                    if let Some(play) = &play {
+                        let title = t("menu-map-camera-play");
+                        let title = if changed(play) {
+                            format!("{title} •")
+                        } else {
+                            title
+                        };
+                        if ui.selectable_label(on_play, title).clicked() {
+                            self.camera_selected = play.clone();
                         }
-                    });
-                let Some(base) = self.cameras.iter().find(|c| c.name == self.camera.camera) else {
+                    }
+                    let title = t("menu-map-camera-other");
+                    let other_changed = self
+                        .cameras
+                        .iter()
+                        .any(|c| Some(&c.name) != play.as_ref() && changed(&c.name));
+                    let title = if other_changed {
+                        format!("{title} •")
+                    } else {
+                        title
+                    };
+                    if ui.selectable_label(!on_play, title).clicked() {
+                        self.camera_selected = self.camera_other.clone();
+                    }
+                });
+                if !on_play {
+                    let current = self
+                        .cameras
+                        .iter()
+                        .find(|c| c.name == self.camera_selected)
+                        .map(label)
+                        .unwrap_or_default();
+                    egui::ComboBox::from_id_salt("menu_map_camera")
+                        .selected_text(current)
+                        .width(360.0)
+                        .show_ui(ui, |ui| {
+                            for camera in &self.cameras {
+                                if Some(&camera.name) == play.as_ref() {
+                                    continue;
+                                }
+                                let text = if changed(&camera.name) {
+                                    format!("{} •", label(camera))
+                                } else {
+                                    label(camera)
+                                };
+                                if ui
+                                    .selectable_label(camera.name == self.camera_selected, text)
+                                    .clicked()
+                                {
+                                    self.camera_selected = camera.name.clone();
+                                    self.camera_other = camera.name.clone();
+                                }
+                            }
+                        });
+                }
+                let Some(base) = self.cameras.iter().find(|c| c.name == self.camera_selected)
+                else {
                     return;
                 };
                 ui.small(format!(
@@ -498,17 +578,25 @@ impl MenuMapState {
                         .map(|fov| format!("  ·  FOV {fov:.0}"))
                         .unwrap_or_default(),
                 ));
+                let original_fov = base.fov;
+                let tweak = self
+                    .camera_tweaks
+                    .entry(self.camera_selected.clone())
+                    .or_insert_with(|| CameraTweak {
+                        camera: self.camera_selected.clone(),
+                        ..CameraTweak::default()
+                    });
                 egui::Grid::new("menu_map_camera_grid")
                     .num_columns(2)
                     .show(ui, |ui| {
-                        for (axis, value) in ["X", "Y", "Z"].iter().zip(&mut self.camera.offset) {
+                        for (axis, value) in ["X", "Y", "Z"].iter().zip(&mut tweak.offset) {
                             ui.label(format!("{} {axis}", t("menu-map-camera-move")));
                             ui.add(egui::DragValue::new(value).speed(5.0).suffix(" uu"));
                             ui.end_row();
                         }
                         ui.label(t("menu-map-camera-pitch"));
                         ui.add(
-                            egui::DragValue::new(&mut self.camera.pitch)
+                            egui::DragValue::new(&mut tweak.pitch)
                                 .speed(0.5)
                                 .range(-89.0..=89.0)
                                 .suffix("°"),
@@ -516,30 +604,31 @@ impl MenuMapState {
                         ui.end_row();
                         ui.label(t("menu-map-camera-yaw"));
                         ui.add(
-                            egui::DragValue::new(&mut self.camera.yaw)
+                            egui::DragValue::new(&mut tweak.yaw)
                                 .speed(0.5)
                                 .range(-180.0..=180.0)
                                 .suffix("°"),
                         );
                         ui.end_row();
-                        if let Some(original) = base.fov {
-                            let mut custom_fov = self.camera.fov.is_some();
+                        if let Some(original) = original_fov {
+                            let mut custom_fov = tweak.fov.is_some();
                             ui.checkbox(&mut custom_fov, t("menu-map-camera-fov"));
                             if custom_fov {
-                                let fov = self.camera.fov.get_or_insert(original);
+                                let fov = tweak.fov.get_or_insert(original);
                                 ui.add(egui::DragValue::new(fov).speed(0.5).range(10.0..=170.0));
                             } else {
-                                self.camera.fov = None;
+                                tweak.fov = None;
                             }
                             ui.end_row();
                         }
                     });
                 if ui.button(t("menu-map-camera-reset")).clicked() {
-                    self.camera = CameraTweak {
-                        camera: self.camera.camera.clone(),
+                    *tweak = CameraTweak {
+                        camera: self.camera_selected.clone(),
                         ..CameraTweak::default()
                     };
                 }
+                ui.small(t("menu-map-camera-each"));
             });
         });
     }
@@ -587,6 +676,75 @@ impl MenuMapState {
         });
     }
 
+    /// Points to the MenuCam BakkesMod plugin, which moves the menu camera and
+    /// cars live so values can be found without restarting the game.
+    fn render_plugin_card(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong(t("menu-map-plugin-title"));
+            ui.add_space(4.0);
+            ui.label(t("menu-map-plugin-description"));
+            ui.add_space(8.0);
+            if ui
+                .button(t("menu-map-plugin-button"))
+                .on_hover_text(MENUCAM_URL)
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(MENUCAM_URL));
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new(t("menu-map-plugin-import")))
+                .on_hover_text(t("menu-map-plugin-import-hint"))
+                .clicked()
+            {
+                self.import_menucam();
+            }
+        });
+    }
+
+    /// Fills Car position and Camera from MenuCam's export. Looks in the
+    /// game's prefixes first, then asks for the file.
+    fn import_menucam(&mut self) {
+        let path = find_menucam_export().or_else(|| {
+            crate::winutil::parent_file_dialog(
+                rfd::FileDialog::new()
+                    .set_title(t("menu-map-import-pick"))
+                    .add_filter("MenuCam export", &["json"]),
+            )
+            .pick_file()
+        });
+        let Some(path) = path else { return };
+        let export = match menu_map::read_menucam_export(&path) {
+            Ok(export) => export,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let mut imported = false;
+        if let Some(car) = export.car {
+            self.car_on = true;
+            self.car = car;
+            imported = true;
+        }
+        for camera in export.cameras {
+            if self.cameras.iter().any(|c| c.name == camera.camera) {
+                self.camera_on = true;
+                self.camera_selected = camera.camera.clone();
+                self.camera_tweaks.insert(camera.camera.clone(), camera);
+                imported = true;
+            }
+        }
+        self.status = if imported {
+            t_args(
+                "menu-map-import-done",
+                &[("path", path.display().to_string().into())],
+            )
+        } else {
+            t("menu-map-import-empty")
+        };
+    }
+
     fn render_reapply(
         &mut self,
         ui: &mut egui::Ui,
@@ -620,21 +778,8 @@ fn camera_purpose(tag: &str) -> Option<String> {
     }
 }
 
-/// Points to the MenuCam BakkesMod plugin, which moves the menu camera and
-/// cars live so values can be found without restarting the game.
-fn render_plugin_card(ui: &mut egui::Ui) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.strong(t("menu-map-plugin-title"));
-        ui.add_space(4.0);
-        ui.label(t("menu-map-plugin-description"));
-        ui.add_space(8.0);
-        if ui
-            .button(t("menu-map-plugin-button"))
-            .on_hover_text(MENUCAM_URL)
-            .clicked()
-        {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(MENUCAM_URL));
-        }
-    });
+/// MenuCam's export in BakkesMod's data folder, if it has made one.
+fn find_menucam_export() -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os("APPDATA")?).join(MENUCAM_EXPORT);
+    path.is_file().then_some(path)
 }

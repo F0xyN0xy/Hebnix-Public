@@ -35,9 +35,12 @@ pub struct ActiveSwap {
     /// Display name of a workshop map. Absent for vanilla arenas.
     #[serde(default)]
     pub label: Option<String>,
-    /// Experimental camera change applied with the swap.
+    /// Experimental camera changes applied with the swap, one per camera.
     #[serde(default)]
-    pub camera: Option<CameraTweak>,
+    pub cameras: Vec<CameraTweak>,
+    /// Older manifests stored a single camera change here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    camera: Option<CameraTweak>,
     /// Experimental move of the car spots, which the home-screen camera follows.
     #[serde(default)]
     pub car: Option<CarTweak>,
@@ -100,7 +103,7 @@ impl CarTweak {
 /// Everything changed in the menu besides the arena.
 #[derive(Clone, Debug, Default)]
 pub struct MenuTweaks {
-    pub camera: Option<CameraTweak>,
+    pub cameras: Vec<CameraTweak>,
     pub car: Option<CarTweak>,
 }
 
@@ -261,6 +264,24 @@ fn read_car_spots(package: &UpkPackage) -> Result<Vec<CarSpot>, String> {
         .collect::<Result<Vec<_>, String>>()?;
     spots.sort_by(|a, b| (a.name != PLAYER_CAR, &a.name).cmp(&(b.name != PLAYER_CAR, &b.name)));
     Ok(spots)
+}
+
+/// Values saved by the MenuCam BakkesMod plugin's Export for Hebnix button
+/// (`bakkesmod/data/menucam/hebnix.json`). Its numbers mean the same as
+/// Hebnix's own camera and car tweaks.
+#[derive(Debug, Default, Deserialize)]
+pub struct MenuCamExport {
+    #[serde(default)]
+    pub car: Option<CarTweak>,
+    #[serde(default)]
+    pub cameras: Vec<CameraTweak>,
+}
+
+pub fn read_menucam_export(path: &Path) -> Result<MenuCamExport, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not a MenuCam export: {e}", path.display()))
 }
 
 /// The home screen's car spots in the unmodified menu, the player's first.
@@ -480,6 +501,11 @@ pub fn active(cooked: &Path) -> Result<Option<ActiveSwap>, String> {
 }
 
 impl ActiveSwap {
+    /// Every camera change, including one from an older manifest.
+    pub fn camera_tweaks(&self) -> Vec<CameraTweak> {
+        self.cameras.iter().chain(&self.camera).cloned().collect()
+    }
+
     pub fn display_name(&self) -> String {
         self.label
             .clone()
@@ -661,7 +687,7 @@ fn prepare(
         .ok_or("No menu streaming template was found.")?
         .class_index;
     redirect_arena_actions(&mut menu, &slots)?;
-    if let Some(camera) = &tweaks.camera {
+    for camera in &tweaks.cameras {
         apply_camera(&mut menu, camera)?;
     }
     if let Some(car) = &tweaks.car {
@@ -782,7 +808,11 @@ fn apply_layers(
     layers: &[PathBuf],
 ) -> Result<String, String> {
     let tweaks = MenuTweaks {
-        camera: tweaks.camera.filter(|tweak| !tweak.is_noop()),
+        cameras: tweaks
+            .cameras
+            .into_iter()
+            .filter(|tweak| !tweak.is_noop())
+            .collect(),
         car: tweaks.car.filter(|tweak| !tweak.is_noop()),
     };
     let state = state_dir(cooked);
@@ -799,7 +829,8 @@ fn apply_layers(
         let manifest = ActiveSwap {
             arena: arena.to_string(),
             label,
-            camera: tweaks.camera,
+            cameras: tweaks.cameras,
+            camera: None,
             car: tweaks.car,
             build,
             original_sha256,
@@ -919,6 +950,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn single_camera_manifest_still_reads() {
+        let state: ActiveSwap = serde_json::from_str(
+            r#"{"arena": "Stadium_P", "camera": {"camera": "CameraActor_2", "offset": [1.0, 2.0, 3.0], "pitch": 0.0, "yaw": 0.0},
+                "build": "", "original_sha256": "", "patched_sha256": "", "files": []}"#,
+        )
+        .unwrap();
+        let cameras = state.camera_tweaks();
+        assert_eq!(cameras.len(), 1);
+        assert_eq!(cameras[0].offset, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn menucam_export_reads_car_and_camera() {
+        let path = std::env::temp_dir().join(format!("hebnix_menucam_{}.json", std::process::id()));
+        fs::write(
+            &path,
+            r#"{"car": {"offset": [100.0, -17118.0, 6215.0], "yaw": 0.0},
+                "cameras": [{"camera": "CameraActor_2", "offset": [0.0, 0.0, 10.0], "pitch": 4.3, "yaw": -13.5, "fov": null}]}"#,
+        )
+        .unwrap();
+        let export = read_menucam_export(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(export.car.unwrap().offset, [100.0, -17118.0, 6215.0]);
+        let camera = &export.cameras[0];
+        assert_eq!(camera.camera, "CameraActor_2");
+        assert_eq!(camera.fov, None);
+    }
+
+    #[test]
     fn manifests_from_older_builds_still_read() {
         let old = r#"{"arena":"Stadium_P","build":"b","original_sha256":"o","patched_sha256":"p","files":[]}"#;
         let state: ActiveSwap = serde_json::from_str(old).unwrap();
@@ -931,6 +991,7 @@ mod tests {
         let state = ActiveSwap {
             arena: "local_ab12".into(),
             label: Some("Cool Map".into()),
+            cameras: Vec::new(),
             camera: None,
             car: None,
             build: String::new(),
