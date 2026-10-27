@@ -38,6 +38,9 @@ pub struct HostShared {
     /// Process-local values registered by enabled plugins. Any plugin may read
     /// or write them; ownership is used to clean them up when a plugin unloads.
     pub cvars: CvarRegistry,
+    /// Produced only by UI-thread Lua callbacks and drained every UI logic pass.
+    /// Keep bulky browser payloads out of the background game-event queue.
+    pub overlay_messages: Vec<(String, serde_json::Value)>,
 }
 
 const RL_CONFIG_FILES: [(&str, &str); 2] = [
@@ -3244,7 +3247,9 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         })?,
     )?;
 
-    // html overlays receive plugin data through the app message queue
+    // Lua and the WebView consumer share the UI thread. Use a per-cycle outbox:
+    // feeding large overlay snapshots back into the incoming event queue lets
+    // each game event amplify a backlog that the time-budgeted consumer cannot drain.
     {
         let overlay = lua.create_table()?;
         let host = Rc::clone(&host);
@@ -3252,10 +3257,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             "send",
             lua.create_function(move |lua, value: LuaValue| {
                 let data: serde_json::Value = lua.from_value(value)?;
-                let _ = host.tx.send(AppMsg::OverlayPost {
-                    slug: host.slug.clone(),
-                    data,
-                });
+                host.shared.borrow_mut().overlay_messages.push((host.slug.clone(), data));
                 Ok(())
             })?,
         )?;

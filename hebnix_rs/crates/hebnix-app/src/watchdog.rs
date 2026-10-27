@@ -1,4 +1,4 @@
-//! Restore only Hebnix's explicit HTTP system proxy after an interrupted exit.
+//! Remove Hebnix's account HTTP redirect and recover legacy proxy settings after an interrupted exit.
 use crate::spoofer::SpooferManager;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};

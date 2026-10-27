@@ -8,11 +8,9 @@ use raw_window_handle::{
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, GetWindowThreadProcessId,
-    HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, SW_RESTORE,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, SwitchToThisWindow,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST,
+    IsIconic, IsWindow, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SwitchToThisWindow,
 };
 use windows::core::PCWSTR;
 
@@ -30,8 +28,16 @@ fn main_window() -> Option<HWND> {
 pub fn acquire_single_instance() -> Option<HANDLE> {
     let name = wide("Global\\hebnix_LiteSingleInstanceMutex_v1");
     unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR(name.as_ptr())).ok()?;
-        (GetLastError() != ERROR_ALREADY_EXISTS).then_some(handle)
+        let handle = CreateMutexW(None, false, PCWSTR(name.as_ptr()))
+            .map_err(|error| tracing::error!(%error, "could not open the single-instance guard"))
+            .ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            tracing::warn!("another Hebnix Lite instance is already running; this launch will exit without initializing graphics");
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+            None
+        } else {
+            Some(handle)
+        }
     }
 }
 
@@ -169,43 +175,11 @@ pub fn main_window_hidden() -> bool {
     HIDDEN.load(Ordering::Relaxed)
 }
 
-/// an alpha 0 window is still a normal one to the os. NOACTIVATE stops it being
-/// handed the foreground, TOOLWINDOW drops it from alt-tab. read live, no frame
-/// change, that would resize the client area.
-fn hidden_bits() -> i32 {
-    (WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32
-}
-
+/// Keep Lite's focus policy in sync with the shared native visibility state.
 pub fn set_main_window_invisible(invisible: bool) {
     HIDDEN.store(invisible, Ordering::Relaxed);
     if let Some(window) = main_window() {
-        unsafe {
-            let style = GetWindowLongW(window, GWL_EXSTYLE);
-            if invisible {
-                SetWindowLongW(
-                    window,
-                    GWL_EXSTYLE,
-                    style | WS_EX_LAYERED.0 as i32 | hidden_bits(),
-                );
-                let _ = SetLayeredWindowAttributes(
-                    window,
-                    windows::Win32::Foundation::COLORREF(0),
-                    0,
-                    LWA_ALPHA,
-                );
-            } else {
-                SetWindowLongW(window, GWL_EXSTYLE, style & !hidden_bits());
-                let _ = SetLayeredWindowAttributes(
-                    window,
-                    windows::Win32::Foundation::COLORREF(0),
-                    255,
-                    LWA_ALPHA,
-                );
-                if !IsWindowVisible(window).as_bool() {
-                    let _ = ShowWindow(window, SW_SHOW);
-                }
-            }
-        }
+        crate::window_state::apply_window_visibility(window, invisible);
     }
 }
 

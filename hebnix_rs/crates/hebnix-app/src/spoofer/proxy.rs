@@ -221,7 +221,7 @@ pub fn read_ureq_response(
     Ok((status, status_text, headers, bytes, ctype))
 }
 
-pub fn build_server_config(resolver: Arc<CertResolver>) -> Result<Arc<ServerConfig>, String> {
+pub fn build_server_config(resolver: Arc<dyn ResolvesServerCert>) -> Result<Arc<ServerConfig>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()

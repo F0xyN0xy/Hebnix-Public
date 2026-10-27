@@ -95,6 +95,78 @@ fn redirects_match(content: &str, hosts: &[&str]) -> bool {
         })
 }
 
+/// Change one owned hostname without changing any other Hebnix or user entries.
+pub fn set_host_redirect(host: &str, enabled: bool) -> Result<(), String> {
+    let _guard = HostsLock::acquire()?;
+    let path = hosts_path();
+    let content = read(&path).map_err(|e| format!("Cannot read hosts: {e}"))?;
+    let out = with_host_redirect(&content, host, enabled)?;
+    if out == content {
+        return Ok(());
+    }
+    write(&path, &out)?;
+    let verified = read(&path).map_err(|e| format!("Cannot verify hosts: {e}"))?;
+    if with_host_redirect(&verified, host, enabled)? != verified {
+        return Err(format!("Could not verify the hosts entry for {host}"));
+    }
+    flush_dns();
+    Ok(())
+}
+
+fn maps_host(line: &str, host: &str) -> bool {
+    line.split('#')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .skip(1)
+        .any(|name| name.eq_ignore_ascii_case(host))
+}
+
+fn with_host_redirect(content: &str, host: &str, enabled: bool) -> Result<String, String> {
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err("Invalid redirect hostname".into());
+    }
+    if enabled
+        && content
+            .lines()
+            .any(|line| maps_host(line, host) && !is_ours(line))
+    {
+        return Err(format!(
+            "An existing hosts entry for {host} must be resolved before enabling the account proxy"
+        ));
+    }
+    let owned: Vec<_> = content
+        .lines()
+        .filter(|line| is_ours(line) && maps_host(line, host))
+        .collect();
+    if (!enabled && owned.is_empty())
+        || (enabled && owned.len() == 1 && owned[0].trim().eq_ignore_ascii_case(&line_for(host)))
+    {
+        return Ok(content.into());
+    }
+    let mut out: String = content
+        .split_inclusive('\n')
+        .filter(|line| !(is_ours(line) && maps_host(line, host)))
+        .collect();
+    if enabled {
+        let newline = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(newline);
+        }
+        out.push_str(&line_for(host));
+        out.push_str(newline);
+    }
+    Ok(out)
+}
+
 pub fn has_redirects() -> bool {
     read(&hosts_path())
         .map(|content| content.lines().any(is_ours))
@@ -178,18 +250,28 @@ fn write(path: &Path, content: &str) -> Result<(), String> {
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        use windows::Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW};
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACE_FILE_FLAGS, ReplaceFileW,
+        };
         let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
         unsafe {
-            ReplaceFileW(
-                windows::core::PCWSTR(target.as_ptr()),
-                windows::core::PCWSTR(source.as_ptr()),
-                None,
-                REPLACE_FILE_FLAGS(0),
-                None,
-                None,
-            )
+            if path.exists() {
+                ReplaceFileW(
+                    windows::core::PCWSTR(target.as_ptr()),
+                    windows::core::PCWSTR(source.as_ptr()),
+                    None,
+                    REPLACE_FILE_FLAGS(0),
+                    None,
+                    None,
+                )
+            } else {
+                MoveFileExW(
+                    windows::core::PCWSTR(source.as_ptr()),
+                    windows::core::PCWSTR(target.as_ptr()),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            }
         }
         .map_err(std::io::Error::other)
     })();

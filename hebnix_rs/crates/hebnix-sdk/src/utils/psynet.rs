@@ -44,7 +44,7 @@ pub fn fetch_psynet_config(build_id: &str, lang: &str) -> Value {
 /// {playlist_id: title} from the config. null Title falls back to the section
 /// key name ("PrivateMatch" -> "Private Match"). only Class=PlaylistSettings_TA.
 pub fn get_online_playlists(config: &Value) -> HashMap<i64, String> {
-    let mut result = HashMap::new();
+    let mut result: HashMap<i64, String> = super::playlists::PLAYLIST_NAMES.iter().map(|(id,name)|(*id,(*name).into())).collect();
     let Some(obj) = config.as_object() else {
         return result;
     };
@@ -58,9 +58,12 @@ pub fn get_online_playlists(config: &Value) -> HashMap<i64, String> {
         let Some(pid) = section.get("PlaylistID").and_then(|v| v.as_i64()) else {
             continue;
         };
-        let title = match section.get("Title").and_then(|v| v.as_str()) {
+        let title = match super::playlists::known_name(pid) {
+            Some(name) => name.to_owned(),
+            None => match section.get("Title").and_then(|v| v.as_str()) {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => key_to_title(key),
+            },
         };
         result.insert(pid, title);
     }

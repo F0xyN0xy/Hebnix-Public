@@ -82,6 +82,12 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
+    /// All overlay publishers execute on this thread. Drain their complete
+    /// output every logic cycle, independently of the incoming event backlog.
+    pub fn take_overlay_messages(&self) -> Vec<(String, serde_json::Value)> {
+        std::mem::take(&mut self.shared.borrow_mut().overlay_messages)
+    }
+
     pub fn new(plugin_dir: PathBuf, tx: Sender<AppMsg>, app_version: &str) -> Self {
         let _ = std::fs::create_dir_all(&plugin_dir);
         Self {
@@ -97,6 +103,7 @@ impl PluginManager {
                 suppress_plugin_logs: false,
                 rl_config_dir: PathBuf::new(),
                 cvars: CvarRegistry::default(),
+                overlay_messages: Vec::new(),
             })),
             last_pos_flush: std::time::Instant::now(),
             last_tick_dispatch: std::time::Instant::now() - std::time::Duration::from_secs(1),

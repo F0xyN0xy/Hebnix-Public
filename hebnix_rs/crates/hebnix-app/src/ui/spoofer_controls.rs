@@ -79,8 +79,8 @@ impl HebnixApp {
     }
 
     pub(super) fn render_spoofer_certificate_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("HTTP proxy certificate");
-        ui.weak("Name and Friends start the HTTP proxy automatically while Rocket League is running. Administrator access and this certificate are required.");
+        ui.heading("Account HTTPS proxy certificate");
+        ui.weak("Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged. Administrator access and this certificate are required.");
         ui.horizontal_wrapped(|ui| {
             ui.label(t("spoofer-certificate-status"));
             ui.label(if self.spoofer_cert_installed {
@@ -92,12 +92,14 @@ impl HebnixApp {
                 if ui.button(t("spoofer-remove")).clicked() {
                     if spoofer::is_admin() {
                         self.disable_certificate_features();
-                        match spoofer::ca::uninstall() {
+                        if self.spoofer_mgr.account_redirect_active() {
+                            self.console.write("[Spoofer] The account redirect could not be removed. The certificate is retained until cleanup succeeds.");
+                        } else { match spoofer::ca::uninstall() {
                             Ok(()) => self.console.write("[Spoofer] Certificate removed."),
                             Err(error) => self
                                 .console
                                 .write(format!("[Spoofer] Certificate removal failed: {error}")),
-                        }
+                        } }
                         self.spoofer_cert_installed =
                             spoofer::ca::is_current_installed(&self.base_dir);
                     } else {

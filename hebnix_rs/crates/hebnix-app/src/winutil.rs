@@ -30,8 +30,12 @@ fn wide(s: &str) -> Vec<u16> {
 pub fn acquire_single_instance() -> Option<HANDLE> {
     let name = wide("Global\\hebnix_SingleInstanceMutex_v1");
     unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR(name.as_ptr())).ok()?;
+        let handle = CreateMutexW(None, false, PCWSTR(name.as_ptr()))
+            .map_err(|error| tracing::error!(%error, "could not open the single-instance guard"))
+            .ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            tracing::warn!("another Hebnix instance is already running; this launch will exit without initializing graphics");
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
             return None;
         }
         Some(handle)
@@ -475,6 +479,10 @@ pub fn restart_rocket_league_multihome(
     Ok(())
 }
 
+pub(crate) fn stop_epic_launcher() -> Result<(), String> {
+    restart_epic_launcher_for_multihome()
+}
+
 fn restart_epic_launcher_for_multihome() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
@@ -679,24 +687,6 @@ fn clear_epic_multihome() -> Result<(), String> {
 pub fn set_main_window_invisible(invisible: bool) {
     MAIN_HIDDEN.store(invisible, Ordering::Relaxed);
     if let Some(hwnd) = main_window_hwnd() {
-        unsafe {
-            use windows::Win32::Foundation::COLORREF;
-            use windows::Win32::UI::WindowsAndMessaging::{
-                GWL_EXSTYLE, GetWindowLongW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-            };
-            let away = (WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32; // read live, no frame change
-            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-            if invisible {
-                SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32 | away);
-                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
-            } else {
-                SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & !away);
-                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-                if !IsWindowVisible(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_SHOW);
-                }
-            }
-        }
+        crate::window_state::apply_window_visibility(hwnd, invisible);
     }
 }

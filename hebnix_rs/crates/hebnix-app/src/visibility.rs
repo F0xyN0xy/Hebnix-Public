@@ -1,19 +1,19 @@
-//! Admit one visibility request, then wait for the native/render/shell barriers.
+//! Admit one visibility request, with bounded native/render/shell settlement.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{Context, ViewportId};
-use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetLayeredWindowAttributes, GetWindowLongW, IsIconic, IsWindowVisible,
-    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, SetWindowLongW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pending {
     id: u64,
+    started_at: Instant,
     hidden: bool,
     started_frame: u64,
     drawn_frame: Option<u64>,
@@ -56,6 +56,7 @@ impl Gate {
         self.generation += 1;
         self.phase = Phase::Changing(Pending {
             id: self.generation,
+            started_at: Instant::now(),
             hidden,
             started_frame: frame,
             drawn_frame: None,
@@ -71,26 +72,22 @@ impl Gate {
         }
     }
 
-    fn candidate(&self, frame: u64) -> Option<Pending> {
+    fn settling(&self, frame: u64) -> Option<Pending> {
         let Phase::Changing(pending) = self.phase else {
             return None;
         };
-        (pending.applied
-            && frame > pending.started_frame
-            && (pending.hidden || pending.drawn_frame.is_some_and(|drawn| frame > drawn)))
-        .then_some(pending)
+        (pending.applied && frame > pending.started_frame).then_some(pending)
     }
 
-    fn complete(
-        &mut self,
-        pending: Pending,
-        taskbar_done: u64,
-        native: bool,
-        composed: bool,
-    ) -> bool {
+    fn candidate(&self, frame: u64) -> Option<Pending> {
+        self.settling(frame).filter(|pending| {
+            pending.hidden || pending.drawn_frame.is_some_and(|drawn| frame > drawn)
+        })
+    }
+
+    fn complete(&mut self, pending: Pending, taskbar_done: u64, native: bool) -> bool {
         if self.phase != Phase::Changing(pending)
             || !native
-            || !composed
             || !pending
                 .taskbar
                 .is_some_and(|request| taskbar_done >= request)
@@ -99,6 +96,19 @@ impl Gate {
         }
         self.phase = Phase::Idle;
         true
+    }
+
+    fn expire(&mut self, now: Instant) -> Option<Pending> {
+        let Phase::Changing(pending) = self.phase else {
+            return None;
+        };
+        if now.saturating_duration_since(pending.started_at) < Duration::from_secs(3) {
+            return None;
+        }
+        // A missing render, unavailable layered-window attributes, or a stalled
+        // Explorer must not permanently disable both the tray and the hotkey.
+        self.phase = Phase::Idle;
+        Some(pending)
     }
 }
 
@@ -130,13 +140,27 @@ pub fn applied(ctx: &Context) {
     crate::window_state::wake_ui(ctx);
     let ctx = ctx.clone();
     // One small checker per accepted transition; a burst cannot spawn more.
-    // This is a retry cadence, not a time-based unlock/debounce.
+    // Normally the native/frame/shell checks settle the transition. The deadline
+    // also runs here so recovery works when Windows stops delivering UI frames.
     std::thread::Builder::new()
         .name("visibility-completion".into())
         .spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(16));
-                let current = GATE.lock().unwrap().phase;
+                let (current, expired) = {
+                    let mut gate = GATE.lock().unwrap();
+                    let expired = gate.expire(Instant::now());
+                    (gate.phase, expired)
+                };
+                if let Some(pending) = expired {
+                    tracing::warn!(
+                        hidden = pending.hidden,
+                        ui_frame_drawn = pending.drawn_frame.is_some(),
+                        taskbar_request = ?pending.taskbar,
+                        "window visibility did not settle within 3 seconds; releasing controls for recovery"
+                    );
+                    crate::window_state::wake_ui(&ctx);
+                }
                 if !matches!(current, Phase::Changing(pending) if pending.id == id) {
                     break;
                 }
@@ -193,25 +217,17 @@ fn native_matches(hidden: bool) -> bool {
 /// guarantees the previous viewport commands and render submission have run.
 pub fn poll(ctx: &Context) {
     let frame = ctx.cumulative_frame_nr_for(ViewportId::ROOT);
-    let Some(mut pending) = GATE.lock().unwrap().candidate(frame) else {
+    let Some(pending) = GATE.lock().unwrap().settling(frame) else {
         return;
     };
     if let Some(hwnd) = crate::window_state::main_window() {
-        unsafe {
-            // Winit's deferred hit-test command rewrites extended styles.
-            // Restore our no-activate/Alt-Tab policy after that command ran.
-            let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-            let away = (WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32;
-            let settled = if pending.hidden {
-                style | away
-            } else {
-                style & !away
-            };
-            if settled != style {
-                SetWindowLongW(hwnd, GWL_EXSTYLE, settled);
-            }
-        }
+        // Restore native visibility before waiting for a drawn frame. An
+        // alpha-zero window can be occluded and never get that first frame.
+        crate::window_state::apply_window_visibility(hwnd, pending.hidden);
     }
+    let Some(mut pending) = GATE.lock().unwrap().candidate(frame) else {
+        return;
+    };
     if !native_matches(pending.hidden) {
         return;
     }
@@ -235,13 +251,13 @@ pub fn poll(ctx: &Context) {
     {
         return;
     }
-    let composed = unsafe { DwmFlush().is_ok() };
-    if GATE.lock().unwrap().complete(
-        pending,
-        taskbar_done,
-        native_matches(pending.hidden),
-        composed,
-    ) {
+    // Do not wait for DwmFlush on the UI thread: controls must remain responsive
+    // even when the compositor is not advancing.
+    if GATE
+        .lock()
+        .unwrap()
+        .complete(pending, taskbar_done, native_matches(pending.hidden))
+    {
         tracing::debug!(
             hidden = pending.hidden,
             "window visibility transition complete"
@@ -289,16 +305,55 @@ mod tests {
                 assert!(gate.candidate(11).is_none());
             }
             let pending = gate.candidate(12).unwrap();
-            assert!(!gate.complete(pending, 6, true, true));
-            assert!(!gate.complete(pending, 7, false, true));
-            assert!(!gate.complete(pending, 7, true, false));
+            assert!(!gate.complete(pending, 6, true));
+            assert!(!gate.complete(pending, 7, false));
             assert!(!gate.queue());
-            assert!(gate.complete(pending, 7, true, true));
+            assert!(gate.complete(pending, 7, true));
             assert!(gate.queue());
             assert!(
                 !gate.queue(),
                 "ignored spam must not be replayed after completion"
             );
+        }
+    }
+
+    #[test]
+    fn stalled_startup_or_toggle_releases_controls_without_replaying_requests() {
+        for hidden in [true, false] {
+            for drawn in [false, true] {
+                let mut gate = Gate::new();
+                assert!(gate.begin(hidden, 0));
+                let Phase::Changing(mut pending) = gate.phase else {
+                    unreachable!()
+                };
+                pending.applied = true;
+                pending.drawn_frame = drawn.then_some(1);
+                // Cover both a missing first frame and a stalled shell update.
+                pending.taskbar = drawn.then_some(1);
+                gate.phase = Phase::Changing(pending);
+                assert_eq!(
+                    gate.settling(1),
+                    Some(pending),
+                    "native recovery must run without a drawn UI frame"
+                );
+                if !hidden && !drawn {
+                    assert!(gate.candidate(1).is_none());
+                }
+                assert!(
+                    gate.expire(pending.started_at + Duration::from_secs(2))
+                        .is_none()
+                );
+                assert!(!gate.queue());
+                assert_eq!(
+                    gate.expire(pending.started_at + Duration::from_secs(3)),
+                    Some(pending)
+                );
+                assert_eq!(gate.phase, Phase::Idle);
+                assert!(!gate.complete(pending, 1, true));
+                assert!(gate.queue());
+                assert!(!gate.queue());
+                assert!(gate.begin(!hidden, 2));
+            }
         }
     }
 }

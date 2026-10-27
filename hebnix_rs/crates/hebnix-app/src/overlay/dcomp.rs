@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1Geometry, ID2D1SolidColorBrush,
 };
@@ -584,22 +584,15 @@ impl D2dCanvas {
                             radiusX: radius,
                             radiusY: radius,
                         };
-                        self.d2d_factory.CreateRoundedRectangleGeometry(&rr).ok()
+                        self.d2d_factory
+                            .CreateRoundedRectangleGeometry(&rr)
+                            .ok()
+                            .and_then(|geometry| geometry.cast::<ID2D1Geometry>().ok())
                     })
                     .flatten();
                 if let Some(ref geo) = mask {
-                    let params = D2D1_LAYER_PARAMETERS1 {
-                        contentBounds: dest,
-                        geometricMask: std::mem::ManuallyDrop::new(
-                            geo.cast::<ID2D1Geometry>().ok(),
-                        ),
-                        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                        maskTransform: identity_matrix(),
-                        opacity: 1.0,
-                        opacityBrush: std::mem::ManuallyDrop::new(None),
-                        layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-                    };
-                    self.ctx.PushLayer(&params, None);
+                    let params = super::layer::ImageLayerParameters::new(dest, geo.clone());
+                    self.ctx.PushLayer(&params.0, None);
                 }
                 self.ctx.DrawBitmap(
                     bmp,
@@ -705,17 +698,6 @@ pub fn measure_text(s: &str, size: f32, bold: bool) -> f32 {
             }
         }
     })
-}
-
-fn identity_matrix() -> windows_numerics::Matrix3x2 {
-    windows_numerics::Matrix3x2 {
-        M11: 1.0,
-        M12: 0.0,
-        M21: 0.0,
-        M22: 1.0,
-        M31: 0.0,
-        M32: 0.0,
-    }
 }
 
 /// gpu-composited overlay window + its device stack

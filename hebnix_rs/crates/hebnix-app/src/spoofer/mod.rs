@@ -21,8 +21,8 @@ use crate::messages::AppMsg;
 use crate::spoofer::rules::{NameRule, Rule, TitleSpoofSettings};
 use http::HttpProxy;
 
-pub const PROXY_HOST: &str = "127.0.0.1";
-pub const PROXY_PORT: u16 = 8080;
+const LEGACY_PROXY_HOST: &str = "127.0.0.1";
+const LEGACY_PROXY_PORT: u16 = 8080;
 pub const MAX_NAME_LENGTH: usize = 32;
 pub const WEBSOCKET_UNAVAILABLE: &str = "WebSocket proxy features are unavailable.";
 
@@ -69,10 +69,20 @@ pub fn spawn_elevated_relaunch() -> bool {
     };
     let exe = exe.to_string_lossy().replace('\'', "''"); // ps single quote escape
     let pid = std::process::id();
+    let renderer_args = if crate::window_state::safe_rendering() {
+        " -ArgumentList '--safe-rendering'"
+    } else {
+        ""
+    };
+    let fallback_args = if crate::window_state::safe_rendering() {
+        format!("{SKIP_ELEVATE_ARG} --safe-rendering")
+    } else {
+        SKIP_ELEVATE_ARG.to_string()
+    };
     let script = format!(
         "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         try {{ Start-Process -FilePath '{exe}' -Verb RunAs -ErrorAction Stop }} \
-         catch {{ Start-Process -FilePath '{exe}' -ArgumentList '{SKIP_ELEVATE_ARG}' }}"
+         try {{ Start-Process -FilePath '{exe}'{renderer_args} -Verb RunAs -ErrorAction Stop }} \
+         catch {{ Start-Process -FilePath '{exe}' -ArgumentList '{fallback_args}' }}"
     );
     std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
@@ -146,7 +156,7 @@ fn restore_legacy_hebnix_proxy(base_dir: &Path) {
         return;
     }
     let current = read_current_proxy();
-    let ours = format!("{PROXY_HOST}:{PROXY_PORT}");
+    let ours = format!("{LEGACY_PROXY_HOST}:{LEGACY_PROXY_PORT}");
     let explicit = format!("http={ours};https={ours}");
     let legacy_hebnix_proxy = current.proxy_server.as_deref() == Some(&ours)
         || current.proxy_server.as_deref() == Some(&explicit);
@@ -172,6 +182,9 @@ pub fn restore_if_crashed(base_dir: &Path) {
         tracing::warn!("stale HTTP proxy marker, restoring system proxy");
         restore_legacy_hebnix_proxy(base_dir);
     }
+    if let Err(error) = crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false) {
+        tracing::warn!("Could not clean up the account HTTP redirect: {error}");
+    }
 }
 
 fn refresh_wininet() {
@@ -192,6 +205,7 @@ pub struct SpooferManager {
     pub discovered_friends: Arc<Mutex<HashMap<String, String>>>,
     http_proxy: Mutex<Option<HttpProxy>>,
     http_active: Arc<AtomicBool>,
+    redirect_active: AtomicBool,
     game_present: Arc<AtomicBool>,
     item_cleanup: crate::item_cleanup::Cleaner,
     crl: Mutex<Option<crl::CrlServer>>,
@@ -238,6 +252,7 @@ impl SpooferManager {
             discovered_friends: Arc::new(Mutex::new(HashMap::new())),
             http_proxy: Mutex::new(None),
             http_active: Arc::new(AtomicBool::new(false)),
+            redirect_active: AtomicBool::new(false),
             game_present: Arc::new(AtomicBool::new(
                 hebnix_sdk::process::is_rocket_league_running(),
             )),
@@ -264,6 +279,9 @@ impl SpooferManager {
                 .http_proxy
                 .lock()
                 .is_ok_and(|proxy| proxy.as_ref().is_some_and(HttpProxy::is_running))
+    }
+    pub fn account_redirect_active(&self) -> bool {
+        self.redirect_active.load(Ordering::Acquire)
     }
     pub fn socket_running(&self) -> bool {
         false
@@ -318,7 +336,9 @@ impl SpooferManager {
             if !crate::watchdog::is_ready() && !crate::watchdog::spawn() {
                 return Err("HTTP proxy recovery watchdog stopped.".into());
             }
-            return Ok(());
+            self.http_active.store(true,Ordering::Release);
+            self.redirect_active.store(true,Ordering::Release);
+            return crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true);
         }
         if !ca::is_current_installed(&self.base_dir) {
             return Err(
@@ -353,48 +373,31 @@ impl SpooferManager {
                 .collect(),
         );
         let proxy = HttpProxy::start(ca, rules, self.tx.clone())?;
-        let backup = marker_path(&self.base_dir);
-        if backup.exists() {
-            proxy.stop();
-            return Err("A previous HTTP proxy backup still needs recovery.".into());
-        }
-        let saved = serde_json::to_vec(&read_current_proxy()).map_err(|e| e.to_string())?;
-        if let Err(error) = std::fs::write(&backup, saved) {
-            proxy.stop();
-            return Err(format!("Could not save HTTP proxy settings: {error}"));
-        }
-        // Arm crash recovery before changing the user's system proxy.
+        // The listener and crash recovery must be ready before publishing a hosts entry.
         if !crate::watchdog::spawn() {
             proxy.stop();
-            let _ = std::fs::remove_file(backup);
             return Err("Could not start HTTP proxy recovery watchdog.".into());
-        }
-        self.http_active.store(true, Ordering::Release);
-        if let Err(error) = apply_proxy(&ProxyBackup {
-            proxy_enable: Some(1),
-            proxy_server: Some(format!(
-                "http={PROXY_HOST}:{PROXY_PORT};https={PROXY_HOST}:{PROXY_PORT}"
-            )),
-            proxy_override: Some("<local>".into()),
-        }) {
-            self.http_active.store(false, Ordering::Release);
-            proxy.stop();
-            restore_legacy_hebnix_proxy(&self.base_dir);
-            return Err(error);
         }
         *self
             .http_proxy
             .lock()
             .map_err(|_| "HTTP proxy lock poisoned")? = Some(proxy);
+        self.http_active.store(true, Ordering::Release);
+        self.redirect_active.store(true, Ordering::Release);
+        crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true)?;
         let _ = self.tx.send(AppMsg::Log(
-            "[Spoofer] HTTP proxy started. WebSocket proxy is unavailable.".into(),
+            "[Spoofer] Account HTTPS proxy ready for api.epicgames.dev. Windows proxy settings are unchanged. Restart Rocket League to refresh its cached display name.".into(),
         ));
         Ok(())
     }
 
-    fn stop_http(&self) {
+    fn stop_http(&self) -> Result<(),String> {
         self.http_active.store(false, Ordering::Release);
-        restore_legacy_hebnix_proxy(&self.base_dir);
+        if self.redirect_active.load(Ordering::Acquire) {
+            // If cleanup fails, keep forwarding through the listener until recovery succeeds.
+            crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false)?;
+            self.redirect_active.store(false,Ordering::Release);
+        }
         if let Ok(mut proxy) = self.http_proxy.lock() {
             if let Some(proxy) = proxy.take() {
                 proxy.stop();
@@ -405,6 +408,7 @@ impl SpooferManager {
                 crl.stop();
             }
         }
+        Ok(())
     }
 
     fn sync_proxy_options(&self) -> Result<(), String> {
@@ -420,11 +424,13 @@ impl SpooferManager {
         );
         if options.account {
             if let Err(error) = self.start_http() {
-                self.stop_http();
+                if let Err(cleanup) = self.stop_http() {
+                    return Err(format!("{error}. Account redirect cleanup also failed: {cleanup}"));
+                }
                 return Err(error);
             }
         } else {
-            self.stop_http();
+            self.stop_http()?;
         }
         Ok(())
     }
@@ -436,7 +442,10 @@ impl SpooferManager {
         let _guard = self.runtime_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.requested_http.store(false, Ordering::Release);
         self.disable_rlapi();
-        self.stop_http();
+        if let Err(error) = self.stop_http() {
+            tracing::error!("Account HTTP proxy cleanup failed: {error}");
+            let _ = self.tx.send(AppMsg::Log(format!("[Spoofer] Account redirect cleanup failed: {error}")));
+        }
     }
     pub fn block_for_certificate_removal(&self) {
         self.certificate_blocked.store(true, Ordering::Release);
