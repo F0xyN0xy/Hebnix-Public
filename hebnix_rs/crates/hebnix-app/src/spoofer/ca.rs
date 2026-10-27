@@ -13,8 +13,21 @@ use rcgen::{
 pub const COMMON_NAME: &str = "Hebnix Local CA"; // certutil matches on this, dont change it
 
 // leaf certs point here for the revoke check
-pub const CRL_PORT: u16 = 8081;
-pub const CRL_URL: &str = "http://127.0.0.1:8081/hebnix.crl";
+/// CRL server ports, tried in order (a fixed 8081 can be taken). Leaf
+/// certificates carry whichever one the running CRL server got.
+pub const CRL_PORTS: &[u16] = &[6968, 6967, 6966, 6965, 0];
+static CRL_PORT_IN_USE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(6968);
+
+pub fn set_crl_port(port: u16) {
+    CRL_PORT_IN_USE.store(port, std::sync::atomic::Ordering::Release);
+}
+
+pub fn crl_url() -> String {
+    format!(
+        "http://127.0.0.1:{}/hebnix.crl",
+        CRL_PORT_IN_USE.load(std::sync::atomic::Ordering::Acquire)
+    )
+}
 
 const NO_WINDOW: u32 = 0x08000000;
 
@@ -99,7 +112,7 @@ impl Ca {
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.crl_distribution_points = vec![CrlDistributionPoint {
-            uris: vec![CRL_URL.to_string()],
+            uris: vec![crl_url()],
         }];
         params.not_before = date_time_ymd(2024, 1, 1);
         params.not_after = date_time_ymd(2034, 1, 1);

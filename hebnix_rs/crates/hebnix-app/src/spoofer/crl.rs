@@ -2,14 +2,14 @@
 //! mid handshake, without it the handshake just dies.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam_channel::Sender;
 
 use crate::messages::AppMsg;
-use crate::spoofer::ca::CRL_PORT;
+use crate::spoofer::ca::CRL_PORTS;
 
 pub struct CrlServer {
     running: Arc<AtomicBool>,
@@ -19,14 +19,9 @@ pub struct CrlServer {
 
 impl CrlServer {
     pub fn start(crl_der: Vec<u8>, tx: Sender<AppMsg>) -> Result<Self, String> {
-        Self::start_on(&format!("127.0.0.1:{CRL_PORT}"), crl_der, tx).map(|(s, _)| s)
-    }
-
-    /// port 0 picks a free one, thats what the tests use
-    fn start_on(addr: &str, crl_der: Vec<u8>, tx: Sender<AppMsg>) -> Result<(Self, u16), String> {
-        let listener =
-            TcpListener::bind(addr).map_err(|e| format!("cant bind crl port {addr}: {e}"))?;
+        let listener = super::bind_local("CRL server", CRL_PORTS)?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        crate::spoofer::ca::set_crl_port(port);
         let running = Arc::new(AtomicBool::new(true));
         let crl = Arc::new(crl_der);
 
@@ -47,14 +42,11 @@ impl CrlServer {
                 .map_err(|e| format!("cant spawn crl thread: {e}"))?
         };
 
-        Ok((
-            Self {
-                running,
-                port,
-                worker: std::sync::Mutex::new(Some(worker)),
-            },
+        Ok(Self {
+            running,
             port,
-        ))
+            worker: std::sync::Mutex::new(Some(worker)),
+        })
     }
 
     pub fn stop(&self) {
