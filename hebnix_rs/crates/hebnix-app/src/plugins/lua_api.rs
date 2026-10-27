@@ -38,6 +38,9 @@ pub struct HostShared {
     /// Process-local values registered by enabled plugins. Any plugin may read
     /// or write them; ownership is used to clean them up when a plugin unloads.
     pub cvars: CvarRegistry,
+    /// Produced only by UI-thread Lua callbacks and drained every UI logic pass.
+    /// Keep bulky browser payloads out of the background game-event queue.
+    pub overlay_messages: Vec<(String, serde_json::Value)>,
 }
 
 const RL_CONFIG_FILES: [(&str, &str); 2] = [
@@ -339,6 +342,127 @@ fn image_palette(path: &std::path::Path) -> Option<[(&'static str, String); 10]>
 }
 
 // asset path where root is relative to plugin <slug>/assets/
+#[derive(Default)]
+struct AssetImport {
+    title: Option<String>,
+    filter_name: Option<String>,
+    extensions: Vec<String>,
+    path: Option<String>,
+    name: Option<String>,
+}
+
+const MAX_IMPORTED_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+
+/// a file name that is safe to create inside the assets folder
+fn asset_file_name(name: &str) -> Option<String> {
+    let name = name.rsplit(['/', '\\']).next()?.trim();
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', ' ']).to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// `dir/name`, or `name (2)`, `name (3)`... when another file already has
+/// that name. A file with the same contents is reused instead.
+fn free_asset_name(dir: &std::path::Path, name: &str, bytes: &[u8]) -> String {
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str());
+    for n in 1.. {
+        let candidate = match (n, ext) {
+            (1, _) => name.to_string(),
+            (_, Some(ext)) => format!("{stem} ({n}).{ext}"),
+            (_, None) => format!("{stem} ({n})"),
+        };
+        match std::fs::read(dir.join(&candidate)) {
+            Ok(existing) if existing == bytes => return candidate,
+            Ok(_) => continue,
+            Err(_) if dir.join(&candidate).exists() => continue,
+            Err(_) => return candidate,
+        }
+    }
+    unreachable!()
+}
+
+/// Ok(None) when the file dialog was cancelled
+fn import_asset(assets_dir: &std::path::Path, request: AssetImport) -> Result<Option<String>, String> {
+    let extensions: Vec<String> = request
+        .extensions
+        .iter()
+        .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .collect();
+    let source = match request.path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(title) = &request.title {
+                dialog = dialog.set_title(title);
+            }
+            if !extensions.is_empty() {
+                dialog = dialog.add_filter(
+                    request.filter_name.as_deref().unwrap_or("Files"),
+                    &extensions,
+                );
+            }
+            match crate::winutil::parent_file_dialog(dialog).pick_file() {
+                Some(path) => path,
+                None => return Ok(None),
+            }
+        }
+    };
+    let wanted = request
+        .name
+        .or_else(|| source.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let name = asset_file_name(&wanted).ok_or_else(|| format!("{wanted} is not a usable file name"))?;
+    if !extensions.is_empty() {
+        let ext = std::path::Path::new(&name)
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !extensions.contains(&ext) {
+            return Err(format!("{name} is not one of: {}", extensions.join(", ")));
+        }
+    }
+    let meta = std::fs::metadata(&source)
+        .map_err(|e| format!("could not read {}: {e}", source.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", source.display()));
+    }
+    if meta.len() > MAX_IMPORTED_ASSET_BYTES {
+        return Err(format!(
+            "{} is larger than {} MB",
+            source.display(),
+            MAX_IMPORTED_ASSET_BYTES / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(&source)
+        .map_err(|e| format!("could not read {}: {e}", source.display()))?;
+    std::fs::create_dir_all(assets_dir)
+        .map_err(|e| format!("could not create the assets folder: {e}"))?;
+    let name = free_asset_name(assets_dir, &name, &bytes);
+    let target = assets_dir.join(&name);
+    if !target.exists() {
+        let temporary = assets_dir.join(format!(".{name}.importing"));
+        std::fs::write(&temporary, &bytes)
+            .and_then(|()| std::fs::rename(&temporary, &target))
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&temporary);
+                format!("could not copy into the assets folder: {e}")
+            })?;
+    }
+    Ok(Some(name))
+}
+
 fn asset_path(plugin_dir: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, String> {
     let root = plugin_dir.join("assets");
     let cleaned = rel.replace('\\', "/");
@@ -1816,6 +1940,46 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         )?;
     }
 
+    // copy a file into this plugin's assets folder: the one picked in a file
+    // dialog, or opts.path. Result lands in on_asset_imported(req_id, name,
+    // error), name being the file name inside assets/ (what list_assets
+    // returns); both are nil when the dialog was cancelled.
+    // opts: title, filter_name, extensions = {"png", ...}, path, name
+    {
+        let host = Rc::clone(&host);
+        hebnix.set(
+            "import_asset_async",
+            lua.create_function(move |_, (req_id, opts): (String, Option<Table>)| {
+                let mut request = AssetImport::default();
+                if let Some(opts) = opts {
+                    request.title = opts.get("title")?;
+                    request.filter_name = opts.get("filter_name")?;
+                    request.extensions = opts
+                        .get::<Option<Vec<String>>>("extensions")?
+                        .unwrap_or_default();
+                    request.path = opts.get("path")?;
+                    request.name = opts.get("name")?;
+                }
+                let assets_dir = host.dir.join("assets");
+                let tx = host.tx.clone();
+                let slug = host.slug.clone();
+                std::thread::spawn(move || {
+                    let (name, error) = match import_asset(&assets_dir, request) {
+                        Ok(name) => (name, None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    let _ = tx.send(AppMsg::PluginAssetImported {
+                        slug,
+                        req_id,
+                        name,
+                        error,
+                    });
+                });
+                Ok(())
+            })?,
+        )?;
+    }
+
     // non-blocking rank fetch by StatsAPI PrimaryId ("Steam|..|0")
     // Poll with hebnix.stats_result(primary_id).
     hebnix.set(
@@ -3244,7 +3408,9 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         })?,
     )?;
 
-    // html overlays receive plugin data through the app message queue
+    // Lua and the WebView consumer share the UI thread. Use a per-cycle outbox:
+    // feeding large overlay snapshots back into the incoming event queue lets
+    // each game event amplify a backlog that the time-budgeted consumer cannot drain.
     {
         let overlay = lua.create_table()?;
         let host = Rc::clone(&host);
@@ -3252,10 +3418,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             "send",
             lua.create_function(move |lua, value: LuaValue| {
                 let data: serde_json::Value = lua.from_value(value)?;
-                let _ = host.tx.send(AppMsg::OverlayPost {
-                    slug: host.slug.clone(),
-                    data,
-                });
+                host.shared.borrow_mut().overlay_messages.push((host.slug.clone(), data));
                 Ok(())
             })?,
         )?;

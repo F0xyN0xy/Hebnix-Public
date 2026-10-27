@@ -252,7 +252,12 @@ impl LiteApp {
         let mut plugin_mgr = PluginManager::new(plugin_dir.clone(), tx.clone(), APP_VERSION);
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
-        let start_hidden = config.settings.start_in_tray;
+        let start_hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering();
+        tracing::info!(
+            hidden = start_hidden,
+            theme = %config.settings.theme,
+            "main window startup settings"
+        );
         let tray = Tray::new(&base_dir, "Hebnix Lite", start_hidden);
         if let Some(tray) = &tray {
             tray.listen(control_tx.clone(), cc.egui_ctx.clone());
@@ -587,13 +592,6 @@ impl LiteApp {
                         winutil::set_main_window_topmost(topmost);
                     }
                 }
-                AppMsg::OverlayPost { slug, data } => {
-                    if let Some(webview) = &self.webview {
-                        if let Err(error) = webview.deliver(&slug, data) {
-                            tracing::debug!("overlay.send from '{slug}' dropped: {error}");
-                        }
-                    }
-                }
                 AppMsg::Toast { .. } => {}
                 AppMsg::PluginHttpRes {
                     slug,
@@ -627,6 +625,17 @@ impl LiteApp {
                 } => self
                     .plugin_mgr
                     .on_http_upload_response(&slug, &req_id, status, &body),
+                AppMsg::PluginAssetImported {
+                    slug,
+                    req_id,
+                    name,
+                    error,
+                } => self.plugin_mgr.on_asset_imported(
+                    &slug,
+                    &req_id,
+                    name.as_deref(),
+                    error.as_deref(),
+                ),
                 AppMsg::PluginHttpResult {
                     slug,
                     req_id,
@@ -755,6 +764,13 @@ impl LiteApp {
                 }
             }
         }
+        for (slug, data) in self.plugin_mgr.take_overlay_messages() {
+            if let Some(webview) = &self.webview {
+                if let Err(error) = webview.deliver(&slug, data) {
+                    tracing::debug!("overlay.send from '{slug}' dropped: {error}");
+                }
+            }
+        }
         ctx.request_repaint();
     }
 
@@ -848,6 +864,8 @@ impl LiteApp {
         if !crate::visibility::begin_change(ctx, hidden) { return; }
         if !hidden {
             winutil::note_foreground();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
         self.hidden = hidden;
         if let Some(tray) = &self.tray {
@@ -2887,7 +2905,7 @@ impl LiteApp {
                 .with_decorations(false)
                 .with_always_on_top()
                 .with_resizable(false)
-                .with_transparent(true)
+                .with_transparent(!crate::window_state::safe_rendering())
                 .with_mouse_passthrough(false)
                 .with_visible(shown)
                 .with_taskbar(false);
@@ -3014,7 +3032,8 @@ impl eframe::App for LiteApp {
     }
 
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        let alpha = if crate::window_state::safe_rendering() { 1.0 } else { 0.0 };
+        [0.0, 0.0, 0.0, alpha]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {

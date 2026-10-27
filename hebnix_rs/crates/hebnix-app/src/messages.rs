@@ -92,11 +92,6 @@ pub enum AppMsg {
     ThemeInstallDone {
         result: Result<(String, String), String>,
     },
-    // overlay.send from a plugin, lands in that plugin's page next frame
-    OverlayPost {
-        slug: String,
-        data: serde_json::Value,
-    },
     // hebnix.toast from a plugin
     Toast {
         slug: String,
@@ -136,6 +131,13 @@ pub enum AppMsg {
         req_id: String,
         status: u16,
         body: String,
+    },
+    // result of import_asset_async, lands in on_asset_imported
+    PluginAssetImported {
+        slug: String,
+        req_id: String,
+        name: Option<String>,
+        error: Option<String>,
     },
     PluginHttpResult {
         slug: String,

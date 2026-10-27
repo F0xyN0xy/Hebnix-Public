@@ -379,15 +379,15 @@ fn display_gamemode(game: Option<&hebnix_sdk::log::LogGameInfo>) -> String {
     let Some(game) = game else {
         return "Private Match".to_string();
     };
+    if let Some(name) = game.playlist_id.and_then(hebnix_sdk::utils::playlists::known_name) {
+        return name.to_owned();
+    }
     if let Some(title) = game
         .playlist_name
         .as_deref()
         .filter(|title| !title.trim().is_empty())
     {
         return title.trim().to_string();
-    }
-    if let Some(name) = game.playlist_id.and_then(playlist_fallback) {
-        return name.to_string();
     }
     let class = game
         .game_class
@@ -416,32 +416,6 @@ fn display_gamemode(game: Option<&hebnix_sdk::log::LogGameInfo>) -> String {
         "Rocket League"
     }
     .to_string()
-}
-
-fn playlist_fallback(id: i64) -> Option<&'static str> {
-    Some(match id {
-        1 => "Duel",
-        2 => "Doubles",
-        3 => "Standard",
-        4 => "Chaos",
-        6 => "Private Match",
-        10 => "Ranked Duel",
-        11 => "Ranked Doubles",
-        13 => "Ranked Standard",
-        15 | 30 => "Snow Day",
-        16 | 35 => "Rocket Labs",
-        17 | 27 => "Hoops",
-        23 | 29 => "Dropshot",
-        25 | 28 => "Rumble",
-        34 => "Tournament Match",
-        37 => "Dropshot Rumble",
-        38 | 43 | 63 => "Heatseeker",
-        44 => "Knockout",
-        48 => "Tactical Rumble",
-        49 => "Spring Loaded",
-        92 => "Bullet Ball Casual",
-        _ => return None,
-    })
 }
 
 /// Convert the cooked-package identifier emitted by StatsAPI into the arena

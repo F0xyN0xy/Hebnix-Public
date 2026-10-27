@@ -252,9 +252,10 @@ fn parse_response(
 fn parse_rank(value: &Value, playlist_id: i64) -> PlaylistRank {
     PlaylistRank {
         playlist_id,
-        playlist_name: string_value(value, "playlist_name")
-            .unwrap_or("")
-            .to_string(),
+        playlist_name: crate::utils::playlists::known_name(playlist_id)
+            .or_else(|| string_value(value, "playlist_name"))
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::utils::playlists::display_name(playlist_id)),
         tier_id: value.get("tier_id").and_then(number_i64).unwrap_or(0),
         tier_name: string_value(value, "tier_name")
             .unwrap_or("Unranked")

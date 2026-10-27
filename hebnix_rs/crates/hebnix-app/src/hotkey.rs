@@ -64,6 +64,12 @@ pub struct ToggleHotkey {
 }
 
 impl ToggleHotkey {
+    pub fn clear(&mut self) {
+        if let Ok(mut key) = self.key.write() {
+            *key = None;
+        }
+    }
+
     pub fn new() -> Option<Self> {
         Some(Self {
             key: Arc::new(RwLock::new(None)),

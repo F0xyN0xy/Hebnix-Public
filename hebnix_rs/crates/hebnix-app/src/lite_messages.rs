@@ -19,10 +19,6 @@ pub enum AppMsg {
     TrayQuit,
     HotkeyCaptured(Option<String>),
     Topmost(bool),
-    OverlayPost {
-        slug: String,
-        data: serde_json::Value,
-    },
     Toast {
         slug: String,
         name: String,
@@ -53,6 +49,13 @@ pub enum AppMsg {
         req_id: String,
         status: u16,
         body: String,
+    },
+    // result of import_asset_async, lands in on_asset_imported
+    PluginAssetImported {
+        slug: String,
+        req_id: String,
+        name: Option<String>,
+        error: Option<String>,
     },
     PluginHttpResult {
         slug: String,

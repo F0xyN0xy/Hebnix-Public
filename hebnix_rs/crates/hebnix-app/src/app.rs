@@ -81,22 +81,13 @@ const RANK_SPOOF_PLAYLISTS: &[(i32, &str)] = &[
     (28, "Rumble"),
     (29, "Dropshot"),
     (30, "Snow Day"),
+    (61, "Quads"),
     (63, "Heatseeker"),
 ];
 
 #[allow(dead_code)]
-fn playlist_name(id: i32) -> &'static str {
-    match id {
-        10 => "Ranked 1v1",
-        11 => "Ranked 2v2",
-        13 => "Ranked 3v3",
-        27 => "Hoops",
-        28 => "Rumble",
-        29 => "Dropshot",
-        30 => "Snow Day",
-        63 => "Heatseeker",
-        _ => "Unknown Playlist",
-    }
+fn playlist_name(id: i32) -> String {
+    hebnix_sdk::utils::playlists::display_name(i64::from(id))
 }
 
 fn rank_name(id: i32) -> &'static str {
@@ -362,6 +353,9 @@ enum PatcherSubTab {
     BoostMeter,
     Decal,
     Car,
+    Anthem,
+    Thumbnail,
+    ItemName,
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
@@ -370,6 +364,7 @@ enum PatcherSubTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplaysSubTab {
     AutoUploadReplays,
+    ReplayTimeline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +470,7 @@ pub struct HebnixApp {
     patcher_subtab: PatcherSubTab,
     swapper_subtab: PatcherSubTab,
     replays_subtab: ReplaysSubTab,
+    replay_timeline: crate::replay_timeline::ReplayTimeline,
     speed_patch: crate::speed_patch::State,
     console: ConsoleState,
     workshop: WorkshopState,
@@ -578,6 +574,7 @@ pub struct HebnixApp {
     patcher_boost: crate::boost_patcher::BoostPatcherState,
     patcher_decal: crate::decal_patcher::DecalPatcherState,
     patcher_car: crate::car_patcher::CarPatcherState,
+    patcher_anthem: crate::patcher::anthem_patcher::AnthemPatcherState,
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
     swapper: crate::swapper::SwapperState,
     colours: crate::patcher::colours::ColoursState,
@@ -722,7 +719,14 @@ impl HebnixApp {
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
-        let hidden = config.settings.start_in_tray;
+        let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering()
+            && crate::replay_history_patch::resume_operation().is_none()
+            && !crate::replay_history_patch::admin_restart_canceled();
+        tracing::info!(
+            hidden,
+            theme = %config.settings.theme,
+            "main window startup settings"
+        );
         let tray = Tray::new(&base_dir, "Hebnix", hidden);
         if let Some(tray) = &tray {
             tray.listen(control_tx.clone(), cc.egui_ctx.clone());
@@ -914,6 +918,7 @@ impl HebnixApp {
         let patcher_boost = crate::boost_patcher::BoostPatcherState::new(&base_dir, &config);
         let patcher_decal = crate::decal_patcher::DecalPatcherState::new(&base_dir, &config);
         let patcher_car = crate::car_patcher::CarPatcherState::new(&base_dir, &config);
+        let patcher_anthem = crate::patcher::anthem_patcher::AnthemPatcherState::new(&base_dir, &config);
         let swapper = crate::swapper::SwapperState::new(&base_dir);
         let owned_restart_marker = base_dir.join("enable_owned_replacements.pending");
         if owned_restart_marker.is_file() {
@@ -942,7 +947,7 @@ impl HebnixApp {
             rx,
             control_rx,
             stats,
-            ws_stats,
+            ws_stats: Arc::clone(&ws_stats),
             stats_tx,
             monitor,
             discord_presence,
@@ -958,11 +963,12 @@ impl HebnixApp {
             patcher_subtab: PatcherSubTab::Ball,
             swapper_subtab: PatcherSubTab::Swapper(crate::swapper::SwapCategory::ALL[0]),
             replays_subtab: ReplaysSubTab::AutoUploadReplays,
+            replay_timeline: crate::replay_timeline::ReplayTimeline::new(&base_dir, &cc.egui_ctx),
             speed_patch: crate::speed_patch::State::default(),
             console: ConsoleState::default(),
             workshop,
             rlapi_panel: crate::ui::rlapi::RlApiPanel::default(),
-            auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays::new(&base_dir),
+            auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays::new(&base_dir).with_refresh_client(Arc::clone(&ws_stats)),
             hidden,
             topmost: false,
             currently_connected: false,
@@ -1052,6 +1058,7 @@ impl HebnixApp {
             patcher_boost,
             patcher_decal,
             patcher_car,
+            patcher_anthem,
             wheel_alignment: Default::default(),
             swapper,
             colours: crate::patcher::colours::ColoursState::new(),
@@ -1088,14 +1095,18 @@ impl HebnixApp {
             crate::visibility::applied(&cc.egui_ctx);
         }
 
+        if let Some(remove)=crate::replay_history_patch::resume_operation() {
+            app.tab=Tab::Replays;
+            crate::replay_history_patch::start_operation(
+                std::path::PathBuf::from(&app.config.settings.rl_path),app.base_dir.clone(),remove,cc.egui_ctx.clone());
+        } else if crate::replay_history_patch::admin_restart_canceled() {
+            app.tab=Tab::Replays;
+            crate::replay_history_patch::show_admin_restart_canceled();
+        }
         app
     }
 
     fn save_config(&mut self) {
-        let http_requested = self.http_spoofer_features().any();
-        self.config
-            .replay_upload
-            .enforce_spoofer(http_requested);
         if let Err(e) = self.config.save(&self.base_dir) {
             self.console
                 .write(format!("[Console] Failed to save config: {e}"));
@@ -1169,6 +1180,9 @@ impl HebnixApp {
             .cloned()
             .ok_or_else(|| "The bodies catalog was not downloaded".to_string())?;
         self.swapper.set_catalogs(&catalogs)?;
+        if let Some(anthems) = catalogs.get("anthems") {
+            self.patcher_anthem.set_catalog(anthems.clone());
+        }
         self.wheel_alignment.set_catalog(&bodies);
         self.patcher_decal.set_catalogs(skins, bodies)?;
         self.patcher_car.set_catalog(
@@ -1223,13 +1237,44 @@ impl HebnixApp {
     }
 
     fn render_replay_auto_upload_tab(&mut self, ui: &mut egui::Ui) {
-        ui.weak(spoofer::WEBSOCKET_UNAVAILABLE);
-        ui.disable();
-        let session = hebnix_sdk::rlapi::session::shared_game_session();
-        let options_were_enabled = self.replay_options_enabled();
-
+        ui.weak("Replay saving and delivery");
+        ui.label("Replay history is checked when a match ends or is left while Rocket League is open.");
+        ui.small("Background history refresh is verified. Automatic delivery after a newly completed game still needs testing.");
+        ui.colored_label(egui::Color32::YELLOW,"Experimental game-package modification. EAC compatibility is not established; a successful launch does not prove approval or safety.");
+        let bridge_installed=crate::replay_history_patch::installed(std::path::Path::new(&self.config.settings.rl_path),&self.base_dir);
+        let bridge_busy=crate::replay_history_patch::busy();
+        ui.horizontal(|ui| {
+            if bridge_installed { ui.colored_label(egui::Color32::GREEN,"Live bridge installed"); }
+            else { ui.weak("Live bridge not installed"); }
+            if bridge_busy {ui.spinner();}
+            let action=if bridge_installed {"Uninstall"} else {"Install"};
+            if ui.add_enabled(!bridge_busy,egui::Button::new(action)).clicked() {
+                self.save_config();
+                match crate::replay_history_patch::restart_as_admin(bridge_installed) {
+                    Ok(()) => {
+                        self.config.window.width=self.last_size.0;
+                        self.config.window.height=self.last_size.1;
+                        self.save_config();
+                        self.auto_upload_replays.stop();
+                        self.spoofer_mgr.shutdown();
+                        self.plugin_mgr.unload_all();
+                        self.stats.stop();
+                        self.ws_stats.stop();
+                        self.monitor.stop();
+                        self.discord_presence.stop();
+                        self.tray=None;
+                        self.workshop.suspend_multiplayer();
+                        std::process::exit(0);
+                    }
+                    Err(error)=>self.console.write(format!("[Replays] {error}")),
+                }
+            }
+        });
+        let bridge_message=crate::replay_history_patch::message();
+        if !bridge_message.is_empty() {ui.label(bridge_message);}
+        if bridge_busy {ui.ctx().request_repaint_after(Duration::from_millis(100));}
         let mut config_changed = false;
-        ui.scope(|ui| {
+        ui.add_enabled_ui(bridge_installed && !bridge_busy, |ui| {
             config_changed |= ui
                 .checkbox(
                     &mut self.config.replay_upload.save_locally,
@@ -1316,10 +1361,8 @@ impl HebnixApp {
             )
             .changed();
         if config_changed {
+            self.auto_upload_replays.stop();
             self.save_config();
-            if !options_were_enabled && self.replay_options_enabled() {
-                self.prompt_for_missing_spoofer_certificate();
-            }
             self.evaluate_proxies();
         }
         ui.separator();
@@ -1331,7 +1374,12 @@ impl HebnixApp {
                 "Enter a ballchasing.com API key to upload replays.",
             );
         }
-        self.auto_upload_replays.show_status(ui, &session.status());
+        if ui.add_enabled(self.replay_options_enabled(), egui::Button::new("Check latest matches now")).clicked() {
+            self.auto_upload_replays.check(&self.config.replay_upload,
+                std::path::Path::new(&self.config.settings.rl_path), &self.config.rl_launch,
+                self.tx.clone(), ui.ctx().clone(), true);
+        }
+        self.auto_upload_replays.show_status(ui);
     }
     fn process_preset_operations(
         &mut self,
@@ -1915,29 +1963,17 @@ impl HebnixApp {
     }
 
     fn replay_options_enabled(&self) -> bool {
-        self.config
-            .replay_upload
-            .enabled_for_spoofer(self.http_spoofer_features().any())
+        self.config.replay_upload.enabled()
+            && crate::replay_history_patch::installed(std::path::Path::new(&self.config.settings.rl_path), &self.base_dir)
+            && !crate::replay_history_patch::busy()
     }
 
     fn sync_proxy_consumers(&mut self) {
-        let http_requested = self.http_spoofer_features().any();
-        if self
-            .config
-            .replay_upload
-            .enforce_spoofer(http_requested)
-        {
-            self.auto_upload_replays.stop();
-            self.save_config();
-        }
         self.spoofer_mgr.configure(self.proxy_options());
-        let session = hebnix_sdk::rlapi::session::shared_game_session();
         self.auto_upload_replays.sync(
             self.replay_options_enabled() && !self.epic_repair.running,
-            self.spoofer_mgr.game_running(),
-            session.enabled()
-                && self.spoofer_mgr.http_running()
-                && self.spoofer_mgr.socket_running(),
+            true,
+            true,
         );
     }
 
@@ -1971,10 +2007,8 @@ impl HebnixApp {
         // Disable HTTP consumers without discarding their names or history.
         self.spoofer_username_enabled = false;
         self.spoofer_friends_enabled = false;
-        self.config.replay_upload.upload_enabled = false;
-        self.config.replay_upload.save_locally = false;
+
         self.spoofer_certificate_prompt_open = false;
-        self.auto_upload_replays.stop();
         self.spoofer_mgr.set_username("");
         self.save_friends_internal();
         self.save_ranks_internal();
@@ -1989,6 +2023,8 @@ impl HebnixApp {
         tracing::info!(hidden, "toggling main window visibility");
         if !hidden {
             winutil::note_foreground();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
         self.hidden = hidden;
 
@@ -2096,18 +2132,19 @@ impl HebnixApp {
                     let debug = self.config.replay_upload.debug_logging;
                     let message = if debug {
                         Some(match &result.result {
-                            Ok(entry) if entry.duplicate => format!(
+                            Ok(Some(entry)) if entry.duplicate => format!(
                                 "[Replay Upload] match {} already exists at {}",
                                 entry.match_guid, entry.location
                             ),
-                            Ok(entry) if entry.replay_id.is_empty() => format!(
+                            Ok(Some(entry)) if entry.replay_id.is_empty() => format!(
                                 "[Replays] saved match {} locally to {}",
                                 entry.match_guid, entry.local_path
                             ),
-                            Ok(entry) => format!(
+                            Ok(Some(entry)) => format!(
                                 "[Replay Upload] uploaded match {} to {}",
                                 entry.match_guid, entry.location
                             ),
+                            Ok(None) => "[Replays] Replay history is up to date".into(),
                             Err(error) => format!(
                                 "[Replay Upload] match {} failed: {error}",
                                 result.match_guid
@@ -2558,13 +2595,6 @@ impl HebnixApp {
                         .console
                         .write(format!("[Console] Theme installation failed: {error}")),
                 },
-                AppMsg::OverlayPost { slug, data } => {
-                    if let Some(webview) = &self.webview {
-                        if let Err(error) = webview.deliver(&slug, data) {
-                            tracing::debug!("overlay.send from '{slug}' dropped: {error}");
-                        }
-                    }
-                }
                 AppMsg::Toast {
                     slug,
                     name,
@@ -2611,6 +2641,24 @@ impl HebnixApp {
                         .on_http_upload_response(&slug, &req_id, status, &body);
                     ctx.request_repaint();
                 }
+                AppMsg::PluginAssetImported {
+                    slug,
+                    req_id,
+                    name,
+                    error,
+                } => {
+                    if let Some(error) = &error {
+                        self.console
+                            .write(format!("[Plugins] {slug}: could not import asset: {error}"));
+                    }
+                    self.plugin_mgr.on_asset_imported(
+                        &slug,
+                        &req_id,
+                        name.as_deref(),
+                        error.as_deref(),
+                    );
+                    ctx.request_repaint();
+                }
                 AppMsg::PluginHttpResult {
                     slug,
                     req_id,
@@ -2649,7 +2697,19 @@ impl HebnixApp {
         }
     }
 
+    fn deliver_overlay_messages(&self) {
+        for (slug, data) in self.plugin_mgr.take_overlay_messages() {
+            if let Some(webview) = &self.webview {
+                if let Err(error) = webview.deliver(&slug, data) {
+                    tracing::debug!("overlay.send from '{slug}' dropped: {error}");
+                }
+            }
+        }
+    }
+
     fn handle_game_event(&mut self, event: hebnix_sdk::stats::StatsEvent, ctx: &egui::Context) {
+        let replay_event = self.replay_timeline.is_replay_event(&event);
+        self.replay_timeline.event(&event, &self.ws_stats);
         self.sync_proxy_consumers();
         match event.event_type.as_str() {
             "UpdateState" => {
@@ -2661,7 +2721,7 @@ impl HebnixApp {
                 if let Some(state) = event.update_state() {
                     self.workshop
                         .update_workshop_map_from_stats(&state.game.arena, &self.tx);
-                    let log = (entered_match || self.auto_upload_replays.needs_match_identity(event.match_guid.as_deref()))
+                    let log = (!replay_event && (entered_match || self.auto_upload_replays.needs_match_identity(event.match_guid.as_deref())))
                         .then(|| hebnix_sdk::log::parse_launch_log(None, true, "INT"));
                     if let (Some(match_guid), Some(log)) = (event.match_guid.as_deref(), log.as_ref()) {
                         self.auto_upload_replays.track_match(match_guid, log.session.primary_id.clone());
@@ -2681,6 +2741,7 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
+                if !replay_event {
                 if let Some(message) = self.auto_upload_replays.submit_finished(
                     event.match_guid.as_deref(),
                     &self.config.replay_upload,
@@ -2691,6 +2752,7 @@ impl HebnixApp {
                 ) {
                     self.console.write(message);
                 }
+                }
                 self.in_match = false;
                 self.match_ended = true;
                 self.plugin_mgr.shared.borrow_mut().in_match = false;
@@ -2698,6 +2760,7 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
+                if !replay_event {
                 if let Some(message) = self.auto_upload_replays.submit_finished(
                     event.match_guid.as_deref(),
                     &self.config.replay_upload,
@@ -2707,6 +2770,7 @@ impl HebnixApp {
                     ctx.clone(),
                 ) {
                     self.console.write(message);
+                }
                 }
                 self.in_match = false;
                 self.match_ended = false;
@@ -2915,6 +2979,7 @@ impl HebnixApp {
         self.patcher_boost.active_boost = self.config.patcher.active_boost.clone();
         self.patcher_decal.active_decals = self.config.patcher.active_decals.clone();
         self.patcher_car.active_cars = self.config.patcher.active_cars.clone();
+        self.patcher_anthem.active_anthems = self.config.patcher.active_anthems.clone();
         self.patcher_ball.source = self.config.patcher.ball_source;
         self.patcher_boost.source = self.config.patcher.boost_source;
         self.patcher_decal.source = self.config.patcher.decal_source;
@@ -3533,7 +3598,8 @@ impl HebnixApp {
                                     egui::ScrollArea::vertical().id_salt("ranks_scroll").show(
                                         ui,
                                         |ui| {
-                                            for &(id, name) in RANK_SPOOF_PLAYLISTS {
+                                            for &(id, fallback_name) in RANK_SPOOF_PLAYLISTS {
+                                                let name = hebnix_sdk::utils::playlists::known_name(i64::from(id)).unwrap_or(fallback_name);
                                                 let state = self.spoofer_ranks.entry(id).or_insert(
                                                     RankSpoofState {
                                                         enabled: false,
@@ -6312,7 +6378,7 @@ impl HebnixApp {
                 .with_decorations(false)
                 .with_always_on_top()
                 .with_resizable(false)
-                .with_transparent(true)
+                .with_transparent(!crate::window_state::safe_rendering())
                 .with_mouse_passthrough(false)
                 .with_visible(should_be_visible)
                 .with_taskbar(false);
@@ -6494,13 +6560,21 @@ impl eframe::App for HebnixApp {
         // eframe skips ui() while occluded, but controls must still run.
         crate::visibility::poll(ctx);
         self.handle_messages(ctx);
+        self.deliver_overlay_messages();
+        self.replay_timeline.tick(ctx, &self.ws_stats,
+            self.tab == Tab::Replays && self.replays_subtab == ReplaysSubTab::ReplayTimeline);
+        self.auto_upload_replays.sync(self.replay_options_enabled() && !self.epic_repair.running, true, true);
+        self.auto_upload_replays.check(&self.config.replay_upload,
+            std::path::Path::new(&self.config.settings.rl_path), &self.config.rl_launch,
+            self.tx.clone(), ctx.clone(), false);
         if winutil::take_minimize_request() && !self.hidden {
             self.set_hidden(ctx, true);
         }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        let alpha = if crate::window_state::safe_rendering() { 1.0 } else { 0.0 };
+        [0.0, 0.0, 0.0, alpha]
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -6682,6 +6756,10 @@ impl eframe::App for HebnixApp {
 
 impl HebnixApp {
     fn render_current_page(&mut self, ui: &mut egui::Ui) {
+        self.patcher_anthem.poll(&mut self.config, &self.tx);
+        if self.tab != Tab::Patcher || self.items_mode != ItemsMode::Patching || self.patcher_subtab != PatcherSubTab::Anthem {
+            self.patcher_anthem.leave_page();
+        }
         if self.tab != Tab::Spoofer || self.spoofer_subtab != SpooferSubTab::Titles {
             self.title_editor.leave_page();
         }
@@ -6735,6 +6813,7 @@ impl HebnixApp {
                             .id_salt(("patcher_subtabs", patching))
                             .show(ui, |ui| {
                                 if patching {
+                                    ui.selectable_value(selected_subtab, PatcherSubTab::Anthem, "Anthem Patcher");
                                     ui.selectable_value(
                                         selected_subtab,
                                         PatcherSubTab::Ball,
@@ -6747,14 +6826,20 @@ impl HebnixApp {
                                     );
                                     ui.selectable_value(
                                         selected_subtab,
+                                        PatcherSubTab::Car,
+                                        t("app-car-patcher"),
+                                    );
+                                    ui.selectable_value(
+                                        selected_subtab,
                                         PatcherSubTab::Decal,
                                         t("app-decal-patcher"),
                                     );
                                     ui.selectable_value(
                                         selected_subtab,
-                                        PatcherSubTab::Car,
-                                        t("app-car-patcher"),
+                                        PatcherSubTab::Thumbnail,
+                                        t("thumbnail-patcher-title"),
                                     );
+                                    ui.selectable_value(selected_subtab, PatcherSubTab::ItemName, t("item-name-title"));
                                 } else {
                                     for category in crate::swapper::SwapCategory::ALL {
                                         ui.selectable_value(
@@ -6786,6 +6871,7 @@ impl HebnixApp {
                             selected_subtab,
                             PatcherSubTab::Decal
                                 | PatcherSubTab::Car
+                                | PatcherSubTab::Anthem
                                 | PatcherSubTab::Swapper(_)
                         );
                         if self.catalogs_loading {
@@ -6852,6 +6938,10 @@ impl HebnixApp {
                                 &mut self.config,
                             );
                         }
+                        PatcherSubTab::Anthem => {
+                            self.owned_inventory.show(ui);
+                            self.patcher_anthem.render_tab(ui, &cooked_pc, &self.tx, &mut self.config, &self.owned_inventory.ids);
+                        }
                         PatcherSubTab::Swapper(category) => {
                             self.owned_inventory.show(ui);
                             let owned_ids = &self.owned_inventory.ids;
@@ -6864,6 +6954,14 @@ impl HebnixApp {
                                 &self.tx,
                                 owned_ids,
                             );
+                        }
+                        PatcherSubTab::Thumbnail => {
+                            self.owned_inventory.show(ui);
+                            self.swapper.render_thumbnail_patcher(ui, &cooked_pc, &backups_dir, &self.owned_inventory.ids);
+                        }
+                        PatcherSubTab::ItemName => {
+                            self.owned_inventory.show(ui);
+                            self.swapper.render_item_names(ui, &cooked_pc, &backups_dir, &self.owned_inventory.ids);
                         }
                         PatcherSubTab::Active => {
                             self.patcher_ball.poll_ops(
@@ -6884,7 +6982,8 @@ impl HebnixApp {
                                 + usize::from(self.patcher_ball.active_ball.is_some())
                                 + usize::from(self.patcher_boost.active_boost.is_some())
                                 + self.patcher_decal.active_decals.len()
-                                + self.patcher_car.active_cars.len();
+                                + self.patcher_car.active_cars.len()
+                                + self.patcher_anthem.active_anthems.len();
                             ui.horizontal(|ui| {
                                 ui.label(t_n("items-active-changes", active_count as i64));
                                 ui.with_layout(
@@ -6897,6 +6996,9 @@ impl HebnixApp {
                                             )
                                             .clicked()
                                         {
+                                            if !self.patcher_anthem.active_anthems.is_empty() {
+                                                self.patcher_anthem.restore_all(&cooked_pc, ctx);
+                                            }
                                             if self.patcher_ball.active_ball.is_some() {
                                                 self.patcher_ball.begin_restore(
                                                     &cooked_pc,
@@ -7104,6 +7206,16 @@ impl HebnixApp {
                                     )));
                                 }
                             }
+                            let active_anthems = self.patcher_anthem.active_anthems.clone();
+                            for (key, name) in active_anthems {
+                                ui.horizontal(|ui| {
+                                    ui.strong(name);
+                                    ui.weak("Patched anthem audio");
+                                    if ui.button(t("app-restore")).clicked() {
+                                        self.patcher_anthem.update_enabled(key, false, &cooked_pc, ctx);
+                                    }
+                                });
+                            }
                             self.swapper.render_active_swaps(
                                 ui, &cooked_pc, &backups_dir, &self.tx,
                             );
@@ -7201,9 +7313,15 @@ impl HebnixApp {
                         ReplaysSubTab::AutoUploadReplays,
                         t("app-automatically-upload-replays"),
                     );
+                    ui.selectable_value(&mut self.replays_subtab, ReplaysSubTab::ReplayTimeline, "Replay Timeline");
                 });
                 ui.separator();
                 match self.replays_subtab {
+                    ReplaysSubTab::ReplayTimeline => {
+                        let folder = crate::auto_upload_replays::configured_replay_directory(
+                            &self.config.replay_upload, std::path::Path::new(&self.config.settings.rl_path), &self.config.rl_launch);
+                        self.replay_timeline.show(ui, folder, &self.ws_stats);
+                    }
                     ReplaysSubTab::AutoUploadReplays => {
                         ui.columns(2, |columns| {
                             egui::ScrollArea::vertical()

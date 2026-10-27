@@ -114,7 +114,11 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
             .instance_descriptor
             .backend_options
             .dx12
-            .presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            .presentation_system = if window_state::safe_rendering() {
+                wgpu::Dx12SwapchainKind::DxgiFromHwnd
+            } else {
+                wgpu::Dx12SwapchainKind::DxgiFromVisual
+            };
     }
     options
 }
@@ -122,6 +126,10 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 fn main() -> eframe::Result {
     let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    tracing::info!(
+        safe_rendering = window_state::safe_rendering(),
+        "main window rendering mode"
+    );
     deep_link::register_and_queue_from_args(&base_dir);
     if let Err(error) = runtime_assets::ensure_present(&base_dir) {
         tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
@@ -145,8 +153,8 @@ fn main() -> eframe::Result {
             (config.window.height as f32).max(DEFAULT_HEIGHT),
         ])
         .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
-        .with_transparent(true)
-        .with_visible(!config.settings.start_in_tray);
+        .with_transparent(!window_state::safe_rendering())
+        .with_visible(!config.settings.start_in_tray || window_state::safe_rendering());
     if let Some(icon) = load_window_icon(&base_dir) {
         viewport = viewport.with_icon(icon);
     }

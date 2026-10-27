@@ -2,6 +2,12 @@
 
 mod app;
 mod auto_upload_replays;
+mod replay_metadata;
+mod replay_scan;
+mod replay_timeline;
+mod replay_source;
+mod replay_history_log;
+mod replay_history_patch;
 mod patcher;
 mod ball {
     pub use crate::patcher::ball::*;
@@ -28,6 +34,7 @@ mod discord_presence;
 mod dpi_fix;
 mod epic_connection;
 mod hotkey;
+mod hosts_file;
 mod i18n;
 mod item_cleanup;
 mod messages;
@@ -177,7 +184,11 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
         // matching dxil.dll, making wgpu's first internal shader fail and lose
         // the device. FXC is provided by Windows and needs no bundled DLLs.
         desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
-        desc.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        desc.backend_options.dx12.presentation_system = if window_state::safe_rendering() {
+            wgpu::Dx12SwapchainKind::DxgiFromHwnd
+        } else {
+            wgpu::Dx12SwapchainKind::DxgiFromVisual
+        };
     }
     options
 }
@@ -198,9 +209,19 @@ fn main() -> eframe::Result {
     }
     setup_panic_hook(&base_dir);
     tracing::info!("Hebnix {} starting", app::APP_VERSION);
+    tracing::info!(
+        safe_rendering = window_state::safe_rendering(),
+        "main window rendering mode"
+    );
 
     let mut cfg = config::Config::load(&base_dir);
+    tracing::info!(
+        pid = std::process::id(),
+        base_dir = %base_dir.display(),
+        "startup configuration loaded"
+    );
     i18n::init(&cfg.settings.language, Some(base_dir.join("locales")));
+    tracing::info!("startup localization initialized");
 
     // relaunch elevated if the user asked for it. --no-elevate comes back when
     // uac was declined
@@ -211,6 +232,7 @@ fn main() -> eframe::Result {
         let _ = spoofer::disable_saved_http_features(&base_dir);
     }
     if cfg.settings.run_as_admin && !skip_elevate && !spoofer::is_admin() {
+        tracing::info!("requesting elevated relaunch");
         if spoofer::spawn_elevated_relaunch() {
             return Ok(());
         }
@@ -222,13 +244,17 @@ fn main() -> eframe::Result {
         winutil::focus_existing_instance();
         return Ok(());
     };
+    tracing::info!("startup single-instance guard acquired");
 
     spoofer::restore_if_crashed(&base_dir);
+    tracing::info!("checking legacy WebSocket cleanup");
     if let Err(error) = spoofer::cleanup_websocket_once(&base_dir) {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
+    tracing::info!("legacy WebSocket cleanup check complete");
     let _ = watchdog::spawn();
 
+    tracing::info!("checking WebView2 runtime");
     webview::runtime::ensure_present();
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
@@ -238,8 +264,10 @@ fn main() -> eframe::Result {
             (cfg.window.height as f32).max(app::MIN_HEIGHT),
         ])
         .with_min_inner_size([app::MIN_WIDTH, app::MIN_HEIGHT])
-        .with_transparent(true)
-        .with_visible(!cfg.settings.start_in_tray);
+        .with_transparent(!window_state::safe_rendering())
+        .with_visible(!cfg.settings.start_in_tray || window_state::safe_rendering()
+            || replay_history_patch::resume_operation().is_some()
+            || replay_history_patch::admin_restart_canceled());
     if let Some(icon) = load_window_icon(&base_dir) {
         viewport = viewport.with_icon(icon);
     }
@@ -250,11 +278,15 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    tracing::info!("starting main window renderer");
     let result = eframe::run_native(
         "Hebnix",
         options,
         Box::new(|cc| Ok(Box::new(HebnixApp::new(cc)))),
     );
+    if let Err(error) = &result {
+        tracing::error!(%error, "main window renderer failed");
+    }
     watchdog::finish_live_handoff();
     result
 }

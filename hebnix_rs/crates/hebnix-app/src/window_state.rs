@@ -5,12 +5,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
-use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PostMessageW, WM_PAINT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
+    SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+};
 
 // Store the address, rather than HWND's non-Send raw pointer. The window remains
 // owned by eframe's UI thread; readers only use it with Win32 window APIs.
@@ -18,6 +22,13 @@ static MAIN_WINDOW: OnceLock<isize> = OnceLock::new();
 static TASKBAR: OnceLock<Option<Sender<TaskbarUpdate>>> = OnceLock::new();
 static TASKBAR_REQUESTED: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+/// An opaque HWND swapchain bypasses DirectComposition for machines where the
+/// transparent visual never appears. Keep the choice stable for every viewport.
+pub fn safe_rendering() -> bool {
+    static SAFE_RENDERING: OnceLock<bool> = OnceLock::new();
+    *SAFE_RENDERING.get_or_init(|| std::env::args_os().any(|arg| arg == "--safe-rendering"))
+}
 
 struct TaskbarUpdate {
     address: isize,
@@ -37,6 +48,35 @@ pub fn init(window: &impl HasWindowHandle) {
 pub fn main_window() -> Option<HWND> {
     let hwnd = HWND(*MAIN_WINDOW.get()? as *mut _);
     unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
+}
+
+/// Winit can replace extended styles when applying mouse passthrough. Reapply
+/// the complete hidden state afterwards, and remove legacy window layering on
+/// Show so a stale alpha-zero surface cannot cover the rendered client area.
+pub fn apply_window_visibility(hwnd: HWND, hidden: bool) {
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let hidden_bits =
+            (WS_EX_LAYERED.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0)
+                as i32;
+        let desired = if hidden {
+            style | hidden_bits
+        } else {
+            style & !hidden_bits
+        };
+        if desired != style {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, desired);
+        }
+        if hidden {
+            if let Err(error) = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA) {
+                tracing::warn!(%error, "could not apply main window hidden alpha");
+            }
+        } else if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+    }
 }
 
 /// Wake controls even when Windows suppresses paints for an alpha-zero window.
@@ -136,6 +176,72 @@ fn taskbar_updates<T>(rx: Receiver<T>, mut apply: impl FnMut(T)) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn showing_clears_hidden_layering_after_a_native_style_rewrite() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetLayeredWindowAttributes,
+            LAYERED_WINDOW_ATTRIBUTES_FLAGS, WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP,
+            WS_VISIBLE,
+        };
+        use windows::core::w;
+
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        unsafe {
+            let preserved = WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP;
+            let window = Window(
+                CreateWindowExW(
+                    preserved | WS_EX_NOACTIVATE,
+                    w!("STATIC"),
+                    w!("Visibility recovery check"),
+                    WS_VISIBLE,
+                    -32000,
+                    -32000,
+                    1,
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            for _ in 0..2 {
+                apply_window_visibility(window.0, true);
+                // Model winit rebuilding styles while applying mouse passthrough.
+                SetWindowLongW(
+                    window.0,
+                    GWL_EXSTYLE,
+                    (preserved.0 | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0) as i32,
+                );
+                apply_window_visibility(window.0, true);
+                let mut alpha = 255;
+                let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS::default();
+                GetLayeredWindowAttributes(window.0, None, Some(&mut alpha), Some(&mut flags))
+                    .unwrap();
+                assert_eq!(alpha, 0);
+                assert!(flags.contains(LWA_ALPHA));
+                apply_window_visibility(window.0, false);
+                let style = GetWindowLongW(window.0, GWL_EXSTYLE) as u32;
+                let hidden =
+                    WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
+                assert_eq!(
+                    style & hidden,
+                    0,
+                    "Show must remove alpha-zero layering and passthrough"
+                );
+                assert_eq!(style & preserved.0, preserved.0);
+                assert!(IsWindowVisible(window.0).as_bool());
+            }
+        }
+    }
 
     #[test]
     fn native_control_wake_reaches_a_hidden_window_without_showing_it() {

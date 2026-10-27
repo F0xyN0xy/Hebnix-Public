@@ -16,6 +16,7 @@
 pub mod dcomp;
 pub mod gdi;
 pub mod gif;
+mod layer;
 pub mod native;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};

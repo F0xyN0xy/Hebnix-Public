@@ -7,18 +7,28 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crossbeam_channel::Sender;
-use rustls::{ServerConnection, StreamOwned};
+pub const ACCOUNT_HOST: &str = "api.epicgames.dev";
+const LISTEN_ADDR: &str = "127.0.0.1:443";
 
-use super::{ca::Ca, proxy, rules::Rule};
-use crate::messages::AppMsg;
+#[derive(Debug)]
+struct AccountCertificate(proxy::CertResolver);
+impl ResolvesServerCert for AccountCertificate {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        if hello
+            .server_name()
+            .is_some_and(|name| !name.eq_ignore_ascii_case(ACCOUNT_HOST))
+        {
+            return None;
+        }
+        self.0.resolve(hello)
+    }
+}
 
 pub struct HttpProxy {
     port: u16,
     running: Arc<AtomicBool>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
-
 impl HttpProxy {
     pub fn start(
         ca: Arc<Ca>,
@@ -32,29 +42,25 @@ impl HttpProxy {
             ca,
             "api.epicgames.dev",
         )))?;
-        let upstream = proxy::build_upstream_agent_pins(Default::default());
+        let listener = TcpListener::bind(LISTEN_ADDR)
+            .map_err(|e| format!("Cannot start account HTTPS proxy on {LISTEN_ADDR}: {e}"))?;
         let running = Arc::new(AtomicBool::new(true));
         let active = Arc::clone(&running);
-        let worker = std::thread::Builder::new()
-            .name("spoofer-http".into())
-            .spawn(move || {
-                for stream in listener.incoming() {
-                    if !active.load(Ordering::Acquire) {
-                        break;
+        let reported = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::Builder::new().name("account-https-proxy".into()).spawn(move || {
+            for stream in listener.incoming() {
+                if !active.load(Ordering::Acquire) { break; }
+                let Ok(stream) = stream else { continue; };
+                let config = Arc::clone(&config); let upstream = upstream.clone();
+                let rules = Arc::clone(&rules); let tx = tx.clone(); let reported = Arc::clone(&reported);
+                std::thread::spawn(move || {
+                    if handle(stream,config,upstream,rules,tx.clone()).is_err() && !reported.swap(true,Ordering::Relaxed) {
+                        // Never record account response bodies, authentication headers or URLs.
+                        let _ = tx.send(AppMsg::Log("[Spoofer] An account HTTPS connection failed. Check the Hebnix certificate and restart Rocket League.".into()));
                     }
-                    let Ok(stream) = stream else { continue };
-                    let config = Arc::clone(&config);
-                    let upstream = upstream.clone();
-                    let rules = Arc::clone(&rules);
-                    let tx = tx.clone();
-                    std::thread::spawn(move || {
-                        if let Err(error) = handle(stream, config, upstream, rules, tx) {
-                            tracing::debug!("HTTP proxy connection ended: {error}");
-                        }
-                    });
-                }
-            })
-            .map_err(|e| format!("Cannot start HTTP proxy: {e}"))?;
+                });
+            }
+        }).map_err(|e|format!("Cannot start account proxy thread: {e}"))?;
         Ok(Self {
             port,
             running,
@@ -73,7 +79,6 @@ impl HttpProxy {
                 .lock()
                 .is_ok_and(|w| w.as_ref().is_some_and(|w| !w.is_finished()))
     }
-
     pub fn stop(&self) {
         if !self.running.swap(false, Ordering::AcqRel) {
             return;
@@ -86,7 +91,6 @@ impl HttpProxy {
         }
     }
 }
-
 impl Drop for HttpProxy {
     fn drop(&mut self) {
         self.stop();
@@ -94,53 +98,24 @@ impl Drop for HttpProxy {
 }
 
 fn handle(
-    mut client: TcpStream,
+    client: TcpStream,
     config: Arc<rustls::ServerConfig>,
     upstream: ureq::Agent,
     rules: Arc<Vec<Box<dyn Rule>>>,
     tx: Sender<AppMsg>,
 ) -> Result<(), String> {
+    let timeout = Some(std::time::Duration::from_secs(15));
     client
-        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .set_read_timeout(timeout)
         .map_err(|e| e.to_string())?;
     client
-        .set_write_timeout(Some(std::time::Duration::from_secs(30)))
+        .set_write_timeout(timeout)
         .map_err(|e| e.to_string())?;
-    // Read only the header so TLS bytes following CONNECT stay in the socket.
-    let mut header = Vec::new();
-    let mut byte = [0];
-    while !header.ends_with(b"\r\n\r\n") {
-        client.read_exact(&mut byte).map_err(|e| e.to_string())?;
-        header.push(byte[0]);
-        if header.len() > 65536 {
-            return Err("Proxy request headers too large".into());
-        }
-    }
-    let text = std::str::from_utf8(&header).map_err(|e| e.to_string())?;
-    let mut first = text
-        .lines()
-        .next()
-        .ok_or("Missing proxy request")?
-        .split_whitespace();
-    let method = first.next().ok_or("Missing method")?;
-    let target = first.next().ok_or("Missing target")?;
-    if method != "CONNECT" {
-        let url = url::Url::parse(target).map_err(|e| e.to_string())?;
-        if url.scheme() != "http" {
-            return Err("Expected an HTTP URL".into());
-        }
-        url.host_str().ok_or("Missing HTTP host")?;
-        let host = &url[url::Position::BeforeHost..url::Position::AfterPort];
-        let mut replay = PrefixedStream {
-            prefix: std::io::Cursor::new(header.clone()),
-            stream: client,
-        };
-        return proxy::serve_one(&mut replay, &upstream, &rules, &tx, host);
-    }
-    let (host, port) = connect_target(target)?;
-    if inspect_account(host, port) {
-        client
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+    let mut connection = ServerConnection::new(config).map_err(|e| e.to_string())?;
+    let mut client = client;
+    while connection.is_handshaking() {
+        connection
+            .complete_io(&mut client)
             .map_err(|e| e.to_string())?;
         let conn = ServerConnection::new(config).map_err(|e| e.to_string())?;
         return proxy::serve_one(StreamOwned::new(conn, client), &upstream, &rules, &tx, host);
@@ -301,4 +276,17 @@ mod tests {
         assert!(connect_target(":443").is_err());
         assert!(connect_target("example.com:bad").is_err());
     }
+    if connection
+        .server_name()
+        .is_some_and(|host| !host.eq_ignore_ascii_case(ACCOUNT_HOST))
+    {
+        return Err("Host is outside the account proxy scope".into());
+    }
+    proxy::serve_one(
+        StreamOwned::new(connection, client),
+        &upstream,
+        &rules,
+        &tx,
+        ACCOUNT_HOST,
+    )
 }

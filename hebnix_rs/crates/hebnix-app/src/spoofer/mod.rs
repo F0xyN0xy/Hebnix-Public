@@ -110,10 +110,20 @@ pub fn spawn_elevated_relaunch() -> bool {
     };
     let exe = exe.to_string_lossy().replace('\'', "''"); // ps single quote escape
     let pid = std::process::id();
+    let renderer_args = if crate::window_state::safe_rendering() {
+        " -ArgumentList '--safe-rendering'"
+    } else {
+        ""
+    };
+    let fallback_args = if crate::window_state::safe_rendering() {
+        format!("{SKIP_ELEVATE_ARG} --safe-rendering")
+    } else {
+        SKIP_ELEVATE_ARG.to_string()
+    };
     let script = format!(
         "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         try {{ Start-Process -FilePath '{exe}' -Verb RunAs -ErrorAction Stop }} \
-         catch {{ Start-Process -FilePath '{exe}' -ArgumentList '{SKIP_ELEVATE_ARG}' }}"
+         try {{ Start-Process -FilePath '{exe}'{renderer_args} -Verb RunAs -ErrorAction Stop }} \
+         catch {{ Start-Process -FilePath '{exe}' -ArgumentList '{fallback_args}' }}"
     );
     std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
@@ -213,6 +223,9 @@ pub fn restore_if_crashed(base_dir: &Path) {
         tracing::warn!("stale HTTP proxy marker, restoring system proxy");
         restore_legacy_hebnix_proxy(base_dir);
     }
+    if let Err(error) = crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false) {
+        tracing::warn!("Could not clean up the account HTTP redirect: {error}");
+    }
 }
 
 fn refresh_wininet() {
@@ -233,6 +246,7 @@ pub struct SpooferManager {
     pub discovered_friends: Arc<Mutex<HashMap<String, String>>>,
     http_proxy: Mutex<Option<HttpProxy>>,
     http_active: Arc<AtomicBool>,
+    redirect_active: AtomicBool,
     game_present: Arc<AtomicBool>,
     item_cleanup: crate::item_cleanup::Cleaner,
     crl: Mutex<Option<crl::CrlServer>>,
@@ -279,6 +293,7 @@ impl SpooferManager {
             discovered_friends: Arc::new(Mutex::new(HashMap::new())),
             http_proxy: Mutex::new(None),
             http_active: Arc::new(AtomicBool::new(false)),
+            redirect_active: AtomicBool::new(false),
             game_present: Arc::new(AtomicBool::new(
                 hebnix_sdk::process::is_rocket_league_running(),
             )),
@@ -305,6 +320,9 @@ impl SpooferManager {
                 .http_proxy
                 .lock()
                 .is_ok_and(|proxy| proxy.as_ref().is_some_and(HttpProxy::is_running))
+    }
+    pub fn account_redirect_active(&self) -> bool {
+        self.redirect_active.load(Ordering::Acquire)
     }
     pub fn socket_running(&self) -> bool {
         false
@@ -359,7 +377,9 @@ impl SpooferManager {
             if !crate::watchdog::is_ready() && !crate::watchdog::spawn() {
                 return Err("HTTP proxy recovery watchdog stopped.".into());
             }
-            return Ok(());
+            self.http_active.store(true,Ordering::Release);
+            self.redirect_active.store(true,Ordering::Release);
+            return crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true);
         }
         if !ca::is_current_installed(&self.base_dir) {
             return Err(
@@ -408,7 +428,6 @@ impl SpooferManager {
         // Arm crash recovery before changing the user's system proxy.
         if !crate::watchdog::spawn() {
             proxy.stop();
-            let _ = std::fs::remove_file(backup);
             return Err("Could not start HTTP proxy recovery watchdog.".into());
         }
         self.http_active.store(true, Ordering::Release);
@@ -432,9 +451,13 @@ impl SpooferManager {
         Ok(())
     }
 
-    fn stop_http(&self) {
+    fn stop_http(&self) -> Result<(),String> {
         self.http_active.store(false, Ordering::Release);
-        restore_legacy_hebnix_proxy(&self.base_dir);
+        if self.redirect_active.load(Ordering::Acquire) {
+            // If cleanup fails, keep forwarding through the listener until recovery succeeds.
+            crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false)?;
+            self.redirect_active.store(false,Ordering::Release);
+        }
         if let Ok(mut proxy) = self.http_proxy.lock() {
             if let Some(proxy) = proxy.take() {
                 proxy.stop();
@@ -445,6 +468,7 @@ impl SpooferManager {
                 crl.stop();
             }
         }
+        Ok(())
     }
 
     fn sync_proxy_options(&self) -> Result<(), String> {
@@ -460,11 +484,13 @@ impl SpooferManager {
         );
         if options.account {
             if let Err(error) = self.start_http() {
-                self.stop_http();
+                if let Err(cleanup) = self.stop_http() {
+                    return Err(format!("{error}. Account redirect cleanup also failed: {cleanup}"));
+                }
                 return Err(error);
             }
         } else {
-            self.stop_http();
+            self.stop_http()?;
         }
         Ok(())
     }
@@ -476,7 +502,10 @@ impl SpooferManager {
         let _guard = self.runtime_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.requested_http.store(false, Ordering::Release);
         self.disable_rlapi();
-        self.stop_http();
+        if let Err(error) = self.stop_http() {
+            tracing::error!("Account HTTP proxy cleanup failed: {error}");
+            let _ = self.tx.send(AppMsg::Log(format!("[Spoofer] Account redirect cleanup failed: {error}")));
+        }
     }
     pub fn block_for_certificate_removal(&self) {
         self.certificate_blocked.store(true, Ordering::Release);
