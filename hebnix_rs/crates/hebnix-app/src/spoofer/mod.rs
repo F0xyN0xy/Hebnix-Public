@@ -22,11 +22,6 @@ use crate::spoofer::rules::{NameRule, Rule, TitleSpoofSettings};
 use http::HttpProxy;
 
 pub const PROXY_HOST: &str = "127.0.0.1";
-/// HTTP proxy ports, tried in order. A fixed 8080 often clashes with
-/// steamwebhelper and local dev servers; 0 lets the OS pick a free port as
-/// the last resort.
-pub const PROXY_PORTS: &[u16] = &[6969, 143, 6970, 6971, 6972, 6973, 0];
-
 /// bind the first free port of `ports` on PROXY_HOST
 pub(crate) fn bind_local(what: &str, ports: &[u16]) -> Result<std::net::TcpListener, String> {
     let mut last_error = None;
@@ -413,41 +408,22 @@ impl SpooferManager {
                 })
                 .collect(),
         );
-        let proxy = HttpProxy::start(ca, rules, self.tx.clone(), PROXY_PORTS)?;
-        let port = proxy.port();
-        let backup = marker_path(&self.base_dir);
-        if backup.exists() {
-            proxy.stop();
-            return Err("A previous HTTP proxy backup still needs recovery.".into());
-        }
-        let saved = serde_json::to_vec(&read_current_proxy()).map_err(|e| e.to_string())?;
-        if let Err(error) = std::fs::write(&backup, saved) {
-            proxy.stop();
-            return Err(format!("Could not save HTTP proxy settings: {error}"));
-        }
-        // Arm crash recovery before changing the user's system proxy.
+        let proxy = HttpProxy::start(ca, rules, self.tx.clone())?;
+        // The listener and crash recovery must be ready before publishing a hosts entry.
         if !crate::watchdog::spawn() {
             proxy.stop();
             return Err("Could not start HTTP proxy recovery watchdog.".into());
-        }
-        self.http_active.store(true, Ordering::Release);
-        if let Err(error) = apply_proxy(&ProxyBackup {
-            proxy_enable: Some(1),
-            proxy_server: Some(proxy_server(port)),
-            proxy_override: Some("<local>".into()),
-        }) {
-            self.http_active.store(false, Ordering::Release);
-            proxy.stop();
-            restore_legacy_hebnix_proxy(&self.base_dir);
-            return Err(error);
         }
         *self
             .http_proxy
             .lock()
             .map_err(|_| "HTTP proxy lock poisoned")? = Some(proxy);
-        let _ = self.tx.send(AppMsg::Log(format!(
-            "[Spoofer] HTTP proxy started on {PROXY_HOST}:{port}. WebSocket proxy is unavailable."
-        )));
+        self.http_active.store(true, Ordering::Release);
+        self.redirect_active.store(true, Ordering::Release);
+        crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true)?;
+        let _ = self.tx.send(AppMsg::Log(
+            "[Spoofer] Account HTTPS proxy ready for api.epicgames.dev. Windows proxy settings are unchanged. Restart Rocket League to refresh its cached display name.".into(),
+        ));
         Ok(())
     }
 
