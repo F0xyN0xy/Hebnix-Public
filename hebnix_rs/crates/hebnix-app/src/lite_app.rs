@@ -625,6 +625,17 @@ impl LiteApp {
                 } => self
                     .plugin_mgr
                     .on_http_upload_response(&slug, &req_id, status, &body),
+                AppMsg::PluginAssetImported {
+                    slug,
+                    req_id,
+                    name,
+                    error,
+                } => self.plugin_mgr.on_asset_imported(
+                    &slug,
+                    &req_id,
+                    name.as_deref(),
+                    error.as_deref(),
+                ),
                 AppMsg::PluginHttpResult {
                     slug,
                     req_id,

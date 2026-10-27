@@ -28,7 +28,7 @@ local TOURNAMENT_PLAYLIST = 34
 
 local STYLES = { "Square", "Circle", "Full" }
 local STYLE_DIRS = { Square = "square", Circle = "circle", Full = "full" }
--- registered by PfpOverlayV2 while it's loaded; icons use Square then
+-- registered by Rocket Profiles (the PfpOverlayV2 plugin) while it's loaded; icons use Square then
 local PFP_OVERLAY_CVAR = "pfp_overlay_active"
 
 local ICON_UNKNOWN = 0

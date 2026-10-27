@@ -50,6 +50,13 @@ pub enum AppMsg {
         status: u16,
         body: String,
     },
+    // result of import_asset_async, lands in on_asset_imported
+    PluginAssetImported {
+        slug: String,
+        req_id: String,
+        name: Option<String>,
+        error: Option<String>,
+    },
     PluginHttpResult {
         slug: String,
         req_id: String,
