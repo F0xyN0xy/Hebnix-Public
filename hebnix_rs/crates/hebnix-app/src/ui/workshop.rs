@@ -966,6 +966,32 @@ impl WorkshopState {
         self.execute_search(false);
     }
 
+    /// downloaded and imported maps, for the menu map picker. one directory
+    /// listing instead of a stat per catalog entry.
+    fn cached_maps(&self) -> Vec<menu_map::CustomMap> {
+        let cached: HashSet<String> = std::fs::read_dir(&self.manager.cache_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        let mut maps: Vec<_> = self
+            .catalog
+            .iter()
+            .filter_map(|map| {
+                let id = id_of(map);
+                let file = format!("{id}.upk");
+                cached.contains(&file).then(|| menu_map::CustomMap {
+                    name: str_of(map, "name", &id).to_string(),
+                    path: self.manager.cache_dir.join(file),
+                    id,
+                })
+            })
+            .collect();
+        maps.sort_by_key(|map| map.name.to_lowercase());
+        maps
+    }
+
     pub fn total_pages(&self) -> usize {
         self.valid.len().div_ceil(self.page_size).max(1)
     }
@@ -1107,7 +1133,8 @@ impl WorkshopState {
             return;
         }
         if self.view == WorkshopView::MenuMap {
-            self.menu_map.render(ui, rl_path, tx);
+            let custom = self.cached_maps();
+            self.menu_map.render(ui, rl_path, &custom, tx);
             return;
         }
 
