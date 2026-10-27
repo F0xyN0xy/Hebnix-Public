@@ -284,15 +284,49 @@ fn colour_decal_preview(image: &mut RgbaImage) {
         let (start, low) = RAMP[segment];
         let (end, high) = RAMP[segment + 1];
         for channel in 0..3 {
-            pixel[channel] =
-                (low[channel] + (high[channel] - low[channel]) * (grey - start) / (end - start))
-                    as u8;
+            pixel[channel] = (low[channel]
+                + (high[channel] - low[channel]) * (grey - start) / (end - start))
+                as u8;
         }
     }
 }
 
 pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
     let package = UpkPackage::load(path)?;
+    let (_, mut pixels) = readable_texture(&package, path, category)?;
+    if category == "skins" || category.starts_with("skins|") {
+        colour_decal_preview(&mut pixels);
+    }
+    preview_png(pixels)
+}
+
+/// The thumbnail editor displays the stored colours, including greyscale artwork.
+pub(crate) fn extract_raw_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
+    let package = UpkPackage::load(path)?;
+    let (_, pixels) = readable_texture(&package, path, category)?;
+    preview_png(pixels)
+}
+
+pub(crate) fn preview_png(pixels: RgbaImage) -> Result<Vec<u8>, String> {
+    let image = DynamicImage::ImageRgba8(pixels);
+    let image = if image.width() > 512 || image.height() > 512 {
+        image.thumbnail(512, 512)
+    } else {
+        image
+    };
+    let mut output = Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(output.into_inner())
+}
+
+/// Resolve exactly the same readable texture for both preview and replacement.
+pub(crate) fn readable_texture(
+    package: &UpkPackage,
+    path: &Path,
+    category: &str,
+) -> Result<(usize, RgbaImage), String> {
     let requested = category
         .strip_prefix("skins|")
         .and_then(|asset| asset.rsplit('.').next());
@@ -300,7 +334,15 @@ pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
     // Follow ProductThumbnailAsset's reference, rather than choosing whichever
     // Texture2D happens to occur last in a multi-texture package.
     let mut indices = Vec::new();
-    let thumbnail_count = package.exports.iter().filter(|export|package.class_of(export).starts_with("ProductThumbnailAsset")).count();
+    let thumbnail_count = package
+        .exports
+        .iter()
+        .filter(|export| {
+            package
+                .class_of(export)
+                .starts_with("ProductThumbnailAsset")
+        })
+        .count();
     for export in &package.exports {
         if !package
             .class_of(export)
@@ -308,7 +350,9 @@ pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
         {
             continue;
         }
-        if thumbnail_count > 1 && let Some(leaf) = requested {
+        if thumbnail_count > 1
+            && let Some(leaf) = requested
+        {
             let name = package.name_of(export.object_name);
             let name = strip(&name);
             if !name.eq_ignore_ascii_case(&format!("{leaf}_T"))
@@ -349,22 +393,7 @@ pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
             continue;
         }
         match texture(&package, export, directory) {
-            Ok(mut image) => {
-                if category == "skins" || category.starts_with("skins|") {
-                    colour_decal_preview(&mut image);
-                }
-                let image = DynamicImage::ImageRgba8(image);
-                let image = if image.width() > 512 || image.height() > 512 {
-                    image.thumbnail(512, 512)
-                } else {
-                    image
-                };
-                let mut output = Cursor::new(Vec::new());
-                image
-                    .write_to(&mut output, ImageFormat::Png)
-                    .map_err(|e| e.to_string())?;
-                return Ok(output.into_inner());
-            }
+            Ok(image) => return Ok((index, image)),
             Err(error) => errors.push(error),
         }
     }
@@ -382,8 +411,8 @@ pub(crate) fn bake_texture(
     export: &ExportEntry,
     pixels: &RgbaImage,
 ) -> Result<Vec<u8>, String> {
-    let bytes = bake_texture_encoded(package, export, pixels, false)?;
-    make_texture_resident(package, export, bytes)
+    let bytes = bake_texture_encoded(package, export, pixels, false, false)?;
+    make_texture_resident(package, export, bytes, false)
 }
 
 /// Bake a mask-bearing diffuse atlas without discarding its alpha channel.
@@ -392,8 +421,17 @@ pub(crate) fn bake_texture_alpha(
     export: &ExportEntry,
     pixels: &RgbaImage,
 ) -> Result<Vec<u8>, String> {
-    let bytes = bake_texture_encoded(package, export, pixels, true)?;
-    make_texture_resident(package, export, bytes)
+    let bytes = bake_texture_encoded(package, export, pixels, true, false)?;
+    make_texture_resident(package, export, bytes, false)
+}
+
+pub(crate) fn bake_thumbnail(
+    package: &UpkPackage,
+    export: &ExportEntry,
+    pixels: &RgbaImage,
+) -> Result<Vec<u8>, String> {
+    let bytes = bake_texture_encoded(package, export, pixels, true, true)?;
+    make_texture_resident(package, export, bytes, true)
 }
 
 /// Marks rebuilt inline mip data as resident. Retaining the old TFC name lets
@@ -402,6 +440,7 @@ fn make_texture_resident(
     package: &UpkPackage,
     export: &ExportEntry,
     mut bytes: Vec<u8>,
+    thumbnail: bool,
 ) -> Result<Vec<u8>, String> {
     let (props, native) = package.serialized_props(export)?;
     let name = |s: &str| {
@@ -421,13 +460,25 @@ fn make_texture_resident(
     }
     if let Some(stream) = props.iter().find(|p| p.name == "NeverStream") {
         bytes[stream.value_offset - 1] = 1;
-    } else {
+    } else if package.names.iter().any(|n| n == "NeverStream") {
         let mut tag = Vec::new();
         for n in [name("NeverStream")?, 0, name("BoolProperty")?, 0, 0, 0] {
             tag.extend_from_slice(&n.to_le_bytes());
         }
         tag.push(1);
         bytes.splice(native - 8..native - 8, tag);
+    } else {
+        // Cooked inventory thumbnails omit NeverStream entirely. Their UI LOD
+        // group is already non-streaming; keep that group and the inline mips.
+        let ui_group = props.iter().find(|p| p.name == "LODGroup").and_then(|p| {
+            let mut at = p.value_offset;
+            package.names.get(word(&bytes, &mut at).ok()? as usize)
+        });
+        // Older inventory textures omit both flags. All their mips are inline,
+        // FirstResourceMemMip is zero, and no TFC reference remains.
+        if !thumbnail && ui_group.map(String::as_str) != Some("TEXTUREGROUP_UI") {
+            return Err("Missing texture property name NeverStream".into());
+        }
     }
     Ok(bytes)
 }
@@ -474,11 +525,68 @@ fn encode_dxt5_alpha(pixels: &RgbaImage, width: usize, height: usize) -> Vec<u8>
     bytes
 }
 
+/// BC1's transparent palette entry preserves padding in older thumbnails that
+/// declare only PF_DXT1. These assets support one-bit alpha.
+fn encode_dxt1_alpha(pixels: &RgbaImage, width: usize, height: usize) -> Vec<u8> {
+    use crate::patcher::patch_core::dxt;
+    let mut output = dxt::image_to_dxt1(pixels, width, height);
+    for by in 0..height.div_ceil(4) {
+        for bx in 0..width.div_ceil(4) {
+            let block: Vec<_> = (0..16)
+                .map(|i| {
+                    *pixels.get_pixel(
+                        (bx * 4 + i % 4).min(width - 1) as u32,
+                        (by * 4 + i / 4).min(height - 1) as u32,
+                    )
+                })
+                .collect();
+            if block.iter().all(|p| p[3] >= 128) {
+                continue;
+            }
+            let colours: Vec<_> = block
+                .iter()
+                .filter(|p| p[3] >= 128)
+                .map(|p| dxt::rgb_to_rgb565(p[0] as i32, p[1] as i32, p[2] as i32))
+                .collect();
+            let low = colours.iter().copied().min().unwrap_or(0) as u16;
+            let high = colours.iter().copied().max().unwrap_or(0) as u16;
+            let (r0, g0, b0) = dxt::rgb565_to_rgb(low);
+            let (r1, g1, b1) = dxt::rgb565_to_rgb(high);
+            let palette = [
+                [r0, g0, b0],
+                [r1, g1, b1],
+                [(r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2],
+            ];
+            let mut indices = 0u32;
+            for (i, pixel) in block.iter().enumerate() {
+                let index = if pixel[3] < 128 {
+                    3
+                } else {
+                    (0..3)
+                        .min_by_key(|&j| {
+                            (0..3)
+                                .map(|c| (pixel[c] as i32 - palette[j][c]).pow(2))
+                                .sum::<i32>()
+                        })
+                        .unwrap()
+                };
+                indices |= (index as u32) << (2 * i);
+            }
+            let at = (by * width.div_ceil(4) + bx) * 8;
+            output[at..at + 2].copy_from_slice(&low.to_le_bytes());
+            output[at + 2..at + 4].copy_from_slice(&high.to_le_bytes());
+            output[at + 4..at + 8].copy_from_slice(&indices.to_le_bytes());
+        }
+    }
+    output
+}
+
 fn bake_texture_encoded(
     package: &UpkPackage,
     export: &ExportEntry,
     pixels: &RgbaImage,
     alpha: bool,
+    thumbnail: bool,
 ) -> Result<Vec<u8>, String> {
     let (props, native) = package.serialized_props(export)?;
     let serial = &package.image[export.serial_offset..export.serial_offset + export.serial_size];
@@ -515,12 +623,30 @@ fn bake_texture_encoded(
         .min(1024)
         .next_power_of_two();
     let mips = size.ilog2() + 1;
+    let pixel_format = if alpha && !package.names.iter().any(|n| n == "PF_DXT5") {
+        // UI thumbnail packages commonly declare only their original BGRA
+        // format. Keep it lossless instead of requiring a new name-table entry.
+        if package.names.iter().any(|n| n == "PF_A8R8G8B8") {
+            "PF_A8R8G8B8"
+        } else if thumbnail {
+            "PF_DXT1"
+        } else {
+            return Err("Required alpha-capable texture format name missing".into());
+        }
+    } else if alpha {
+        "PF_DXT5"
+    } else {
+        "PF_DXT1"
+    };
     let format = package
         .names
         .iter()
-        .position(|n| n == if alpha { "PF_DXT5" } else { "PF_DXT1" })
-        .ok_or("Required DXT format name missing")?;
+        .position(|n| n == pixel_format)
+        .ok_or("Required alpha-capable texture format name missing")?;
     for prop in &props {
+        if alpha && prop.name == "CompressionNoAlpha" {
+            output[prop.value_offset - 1] = 0;
+        }
         let value = match prop.name.as_str() {
             "SizeX" | "SizeY" | "OriginalSizeX" | "OriginalSizeY" => Some(size),
             "MipTailBaseIdx" => Some(mips - 1),
@@ -540,12 +666,19 @@ fn bake_texture_encoded(
         let width = (size >> level).max(1);
         let resized =
             image::imageops::resize(pixels, width, width, image::imageops::FilterType::Triangle);
-        let encode = if alpha {
-            encode_dxt5_alpha
+        let bytes = if pixel_format == "PF_A8R8G8B8" {
+            let mut bytes = resized.into_raw();
+            for pixel in bytes.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            bytes
+        } else if alpha && pixel_format == "PF_DXT1" {
+            encode_dxt1_alpha(&resized, width as usize, width as usize)
+        } else if alpha {
+            encode_dxt5_alpha(&resized, width as usize, width as usize)
         } else {
-            crate::patcher::patch_core::dxt::image_to_dxt1
+            crate::patcher::patch_core::dxt::image_to_dxt1(&resized, width as usize, width as usize)
         };
-        let bytes = encode(&resized, width as usize, width as usize);
         for n in [0x10000, bytes.len() as u32, bytes.len() as u32] {
             push(&mut output, n);
         }

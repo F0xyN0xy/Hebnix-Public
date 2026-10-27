@@ -19,10 +19,6 @@ pub enum AppMsg {
     TrayQuit,
     HotkeyCaptured(Option<String>),
     Topmost(bool),
-    OverlayPost {
-        slug: String,
-        data: serde_json::Value,
-    },
     Toast {
         slug: String,
         name: String,

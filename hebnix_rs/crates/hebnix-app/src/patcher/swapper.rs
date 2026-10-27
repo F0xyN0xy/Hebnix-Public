@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod browser;
+mod item_name;
+mod thumbnail_patcher;
 #[cfg(test)]
 mod browser_tests;
 
@@ -409,6 +411,8 @@ pub struct SwapperState {
     swap_speed: HashMap<String, f32>,
     /// set from the Items animation speed tab; shows the speed picker on swap rows
     pub speed_enabled: bool,
+    thumbnail_editor: thumbnail_patcher::State,
+    name_editor: item_name::State,
 }
 
 impl SwapperState {
@@ -417,8 +421,11 @@ impl SwapperState {
         let (results, thumbnail_results) = unbounded();
         std::thread::spawn(move || {
             while let Ok((key, path, category, context)) = jobs.recv() {
-                let result =
-                    crate::cosmetic_thumbnail::extract_png(&path, &category).map(Into::into);
+                let result = if let Some(kind) = category.strip_prefix("raw|") {
+                    crate::cosmetic_thumbnail::extract_raw_png(&path, kind)
+                } else {
+                    crate::cosmetic_thumbnail::extract_png(&path, &category)
+                }.map(Into::into);
                 let _ = results.send((key, result));
                 context.request_repaint();
             }
@@ -511,6 +518,8 @@ impl SwapperState {
             recolour_status: None,
             swap_speed: HashMap::new(),
             speed_enabled: false,
+            thumbnail_editor: thumbnail_patcher::State::default(),
+            name_editor: item_name::State::default(),
         }
     }
 

@@ -178,16 +178,8 @@ fn default_replay_naming_template() -> String {
 }
 
 impl ReplayUploadCfg {
-    pub fn enabled_for_spoofer(&self, _spoofer_enabled: bool) -> bool {
-        false
-    }
-
-    /// Retired WebSocket capture stays disabled; preserve upload credentials/settings.
-    pub fn enforce_spoofer(&mut self, _spoofer_enabled: bool) -> bool {
-        let changed = self.upload_enabled || self.save_locally;
-        self.upload_enabled = false;
-        self.save_locally = false;
-        changed
+    pub fn enabled(&self) -> bool {
+        self.upload_enabled || self.save_locally
     }
 }
 
@@ -215,6 +207,7 @@ pub struct PatcherCfg {
     pub active_boost: Option<String>,
     pub active_decals: std::collections::HashMap<String, String>,
     pub active_cars: std::collections::HashMap<String, String>,
+    pub active_anthems: std::collections::HashMap<String, String>,
     pub ball_source: PatchSource,
     pub boost_source: PatchSource,
     pub decal_source: PatchSource,
@@ -470,30 +463,4 @@ fn parse_ini_bool(v: &str, default: bool) -> bool {
 /// App root dir: `%AppData%\Hebnix`, or `HEBNIX_BASE_DIR` for dev runs.
 pub fn base_dir() -> PathBuf {
     hebnix_sdk::utils::paths::base_dir()
-}
-
-#[cfg(test)]
-mod replay_dependency_tests {
-    use super::ReplayUploadCfg;
-    #[test]
-    fn retired_replay_preferences_stay_disabled_and_preserve_other_settings() {
-        for (save, upload) in [(false, false), (true, false), (false, true), (true, true)] {
-            let mut config = ReplayUploadCfg {
-                save_locally: save,
-                upload_enabled: upload,
-                api_key: "keep-key".into(),
-                save_directory: "keep-directory".into(),
-                ..Default::default()
-            };
-            assert!(!config.enabled_for_spoofer(true));
-            assert!(!config.enabled_for_spoofer(false));
-            assert_eq!(config.enforce_spoofer(true), save || upload);
-            assert_eq!((config.save_locally, config.upload_enabled), (false, false));
-            assert!(!config.enforce_spoofer(false));
-            assert!(!config.save_locally && !config.upload_enabled);
-            assert_eq!(config.api_key, "keep-key");
-            assert_eq!(config.save_directory, "keep-directory");
-            assert!(!config.enabled_for_spoofer(true));
-        }
-    }
 }

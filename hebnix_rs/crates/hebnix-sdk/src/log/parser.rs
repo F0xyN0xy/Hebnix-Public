@@ -294,7 +294,7 @@ fn parse_game_info(
         }
     }
     if let Some(pid) = game.playlist_id {
-        game.playlist_name = online_playlists.get(&pid).cloned();
+        game.playlist_name = online_playlists.get(&pid).cloned().or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
     }
 
     // welcomed by server (map + game class + tags)
