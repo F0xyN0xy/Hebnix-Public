@@ -48,6 +48,19 @@ fn load_icon(base_dir: &Path) -> Icon {
 
 impl Tray {
     pub fn new(base_dir: &Path, tooltip: &str, hidden: bool) -> Option<Self> {
+        // tray-icon's Linux backend goes through libayatana-appindicator/GTK,
+        // which needs gtk::init() called once before any tray/menu object is
+        // built (Windows' native backend has no such requirement).
+        #[cfg(target_os = "linux")]
+        {
+            static GTK_INIT: std::sync::Once = std::sync::Once::new();
+            GTK_INIT.call_once(|| {
+                if let Err(e) = gtk::init() {
+                    tracing::warn!("gtk::init() failed, tray icon will be unavailable: {e}");
+                }
+            });
+        }
+
         let menu = Menu::new();
         let open_item = MenuItem::new(Self::visibility_text(hidden), true, None);
         let quit_item = MenuItem::new(t("tray-close"), true, None);

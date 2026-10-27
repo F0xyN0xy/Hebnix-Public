@@ -1,4 +1,4 @@
-//! Rocket League profile service client.
+//! tracker.gg client for rocket league player stats.
 
 pub mod cache;
 pub mod client;

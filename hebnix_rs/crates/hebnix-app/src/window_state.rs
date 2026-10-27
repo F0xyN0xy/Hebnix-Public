@@ -5,11 +5,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
     SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
@@ -179,12 +183,14 @@ mod tests {
 
     #[test]
     fn showing_clears_hidden_layering_after_a_native_style_rewrite() {
-        use windows::Win32::UI::WindowsAndMessaging::{
+        #[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, GetLayeredWindowAttributes,
             LAYERED_WINDOW_ATTRIBUTES_FLAGS, WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP,
             WS_VISIBLE,
         };
-        use windows::core::w;
+        #[cfg(target_os = "windows")]
+use windows::core::w;
 
         struct Window(HWND);
         impl Drop for Window {
@@ -245,11 +251,13 @@ mod tests {
 
     #[test]
     fn native_control_wake_reaches_a_hidden_window_without_showing_it() {
-        use windows::Win32::UI::WindowsAndMessaging::{
+        #[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW,
             WINDOW_EX_STYLE, WINDOW_STYLE,
         };
-        use windows::core::w;
+        #[cfg(target_os = "windows")]
+use windows::core::w;
 
         unsafe {
             let window = CreateWindowExW(
@@ -289,10 +297,12 @@ mod tests {
     fn cached_window_lookup_does_not_wait_for_its_window_thread() {
         use raw_window_handle::{HandleError, Win32WindowHandle, WindowHandle};
         use std::num::NonZeroIsize;
-        use windows::Win32::UI::WindowsAndMessaging::{
+        #[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
         };
-        use windows::core::w;
+        #[cfg(target_os = "windows")]
+use windows::core::w;
 
         struct TestWindow(isize);
         impl HasWindowHandle for TestWindow {

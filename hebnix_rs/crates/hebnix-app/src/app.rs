@@ -720,8 +720,12 @@ impl HebnixApp {
         let _ = config.save(&base_dir);
 
         let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering()
-            && crate::replay_history_patch::resume_operation().is_none()
-            && !crate::replay_history_patch::admin_restart_canceled();
+            && {
+                #[cfg(target_os = "windows")]
+                { { #[cfg(target_os = "windows")] { crate::replay_history_patch::resume_operation() } #[cfg(target_os = "linux")] { None } }.is_none() && !{ #[cfg(target_os = "windows")] { crate::replay_history_patch::admin_restart_canceled() } #[cfg(target_os = "linux")] { false } } }
+                #[cfg(target_os = "linux")]
+                { true }
+            };
         tracing::info!(
             hidden,
             theme = %config.settings.theme,
@@ -1095,11 +1099,11 @@ impl HebnixApp {
             crate::visibility::applied(&cc.egui_ctx);
         }
 
-        if let Some(remove)=crate::replay_history_patch::resume_operation() {
+        if let Some(remove)={ #[cfg(target_os = "windows")] { crate::replay_history_patch::resume_operation() } #[cfg(target_os = "linux")] { None } } {
             app.tab=Tab::Replays;
             crate::replay_history_patch::start_operation(
                 std::path::PathBuf::from(&app.config.settings.rl_path),app.base_dir.clone(),remove,cc.egui_ctx.clone());
-        } else if crate::replay_history_patch::admin_restart_canceled() {
+        } else if { #[cfg(target_os = "windows")] { crate::replay_history_patch::admin_restart_canceled() } #[cfg(target_os = "linux")] { false } } {
             app.tab=Tab::Replays;
             crate::replay_history_patch::show_admin_restart_canceled();
         }

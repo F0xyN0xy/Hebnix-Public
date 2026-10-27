@@ -6,12 +6,15 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as SessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
+#[cfg(target_os = "windows")]
 use windows::Storage::Streams::DataReader;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 
 const POLL: Duration = Duration::from_millis(750);

@@ -13,7 +13,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use regex::Regex;
 
 use crate::log::models::{LogGameInfo, LogInfo, LogSessionInfo};
-use crate::process::is_rocket_league_running;
 use crate::utils::psynet::{fetch_psynet_config, get_online_playlists};
 
 const STATS_HOST: &str = "127.0.0.1";
@@ -50,9 +49,8 @@ re!(
     re_welcomed,
     r"DevNet: Welcomed by server \(Level: ([^,]+), Game: ([^,]+), GameTags: ([^)]+)\)"
 );
-// JoinSettings writes PlaylistId=6, the anti cheat line writes PlaylistId=(6)
-re!(re_playlist_id, r"PlaylistId=\(?(\d+)");
-re!(re_playlist, r"Playlist=\(?(\d+)");
+re!(re_playlist_id, r"PlaylistId=(\d+)");
+re!(re_playlist, r"Playlist=(\d+)");
 re!(re_server_name, r#"ServerName="([^"]+)""#);
 re!(re_region, r#"Region="([^"]+)""#);
 re!(re_browse_remote, r"DevNet: Browse: ([\d.]+):(\d+)/(\S+)");
@@ -60,7 +58,6 @@ re!(re_browse_local, r"DevNet: Browse: (\S+)");
 re!(re_build_id, r"Log: BuildID: (\d+) from GPsyonixBuildID");
 re!(re_browse_game, r"[?&]Game=([^?&]+)");
 re!(re_browse_tags, r"[?&]GameTags=([^?&]+)");
-re!(re_loadmap_tags, r"LoadMap: \S*[?&]GameTags=([^?&\s]+)");
 re!(re_loadmap_offline, r"LoadMap: \S*[?&]Offline(?:[?&]|\s|$)");
 
 fn find_last<'t>(re: &Regex, text: &'t str) -> Option<regex::Captures<'t>> {
@@ -136,14 +133,19 @@ fn check_stats_port() -> bool {
 
 // Main entry point
 
+/// Launch.log lives under the emulated "My Documents" of the Wine/Proton
+/// prefix Rocket League runs in, never the host's real ~/Documents: the
+/// running game's prefix when its exe is inside it, else
+/// process::rocket_league_documents_dir (Settings choice, the running game's
+/// WINEPREFIX, or the prefix with the newest real Rocket League files).
 fn find_launch_log() -> PathBuf {
-    dirs::document_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("My Games")
-        .join("Rocket League")
-        .join("TAGame")
-        .join("Logs")
-        .join("Launch.log")
+    let rel = Path::new("My Games/Rocket League/TAGame/Logs/Launch.log");
+    let docs = crate::process::find_rocket_league()
+        .and_then(|game| crate::process::documents_dir_for_exe(&game.exe_path))
+        .or_else(crate::process::rocket_league_documents_dir)
+        .or_else(dirs::document_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    docs.join(rel)
 }
 
 /// Read the local account ID without network or Stats API verification.
@@ -227,7 +229,6 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
 
     // Game info (only after verification)
     let mut game: Option<LogGameInfo> = None;
-    let rl_running = is_rocket_league_running();
     let stats_available;
     let verified;
 
@@ -240,8 +241,7 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
         stats_available = check_stats_port();
     }
 
-    // rl down means the log describes a session that already ended
-    if rl_running && (verified || !verify) {
+    if verified || !verify {
         let mut g = parse_game_info(&text, verified, &online_playlists);
 
         // in-game but map/ip missing? wait + re-read, the log fills in during join
@@ -260,7 +260,6 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
     LogInfo {
         session,
         game,
-        build_id: build_id.filter(|_| rl_running),
         log_path: Some(log_path.to_string_lossy().to_string()),
         parse_time: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -294,7 +293,7 @@ fn parse_game_info(
         }
     }
     if let Some(pid) = game.playlist_id {
-        game.playlist_name = online_playlists.get(&pid).cloned().or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
+        game.playlist_name = online_playlists.get(&pid).cloned();
     }
 
     // welcomed by server (map + game class + tags)
@@ -367,15 +366,6 @@ fn parse_game_info(
         game.game_class = Some(game_class);
     }
 
-    // the last LoadMap is the current map. matching the last LoadMap that happens to carry GameTags instead inherits them from an older load, a menu clears them
-    if text.contains("LoadMap:") {
-        game.game_tags = tags_of_last_map_load(text);
-    }
-    if let Some(tags) = game.game_tags.as_deref() {
-        (game.mutators, game.bot_skill, game.player_count) = split_game_tags(tags);
-    }
-    game.mutator_count = count_mutator_packages(text).max(game.mutators.len() as i64);
-
     if let Some(c) = find_last(re_server_name(), text) {
         game.server_name = Some(c[1].to_string());
     }
@@ -403,39 +393,6 @@ fn last_map_load_is_offline(text: &str) -> bool {
         .lines()
         .next()
         .is_some_and(|line| re_loadmap_offline().is_match(line))
-}
-
-/// GameTags off the last LoadMap, None when that load carries none
-fn tags_of_last_map_load(text: &str) -> Option<String> {
-    let pos = text.rfind("LoadMap:")?;
-    let line = text[pos..].lines().next()?;
-    re_loadmap_tags().captures(line).map(|c| c[1].to_string())
-}
-
-/// the game loads Mutators_SF.upk once per mutator
-fn count_mutator_packages(text: &str) -> i64 {
-    let from = text.rfind("LoadMap:").map(|i| i + 1).unwrap_or(0);
-    text[from..].matches("Mutators_SF").count() as i64
-}
-
-fn split_game_tags(tags: &str) -> (Vec<String>, Option<String>, Option<i64>) {
-    let mut mutators = Vec::new();
-    let mut bot_skill = None;
-    let mut player_count = None;
-    for tag in tags.split(',') {
-        let tag = tag.trim();
-        if tag.is_empty() {
-            continue;
-        }
-        if let Some(skill) = tag.strip_prefix("Bots") {
-            bot_skill = Some(skill.to_string());
-        } else if let Some(count) = tag.strip_prefix("PlayerCount") {
-            player_count = count.parse().ok();
-        } else {
-            mutators.push(tag.to_string());
-        }
-    }
-    (mutators, bot_skill, player_count)
 }
 
 /// map name from a browse url path

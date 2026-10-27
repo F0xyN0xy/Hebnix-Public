@@ -32,10 +32,15 @@ use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::DirectComposition::IDCompositionVisual;
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::ScreenToClient;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+#[cfg(target_os = "windows")]
 use windows::core::{Interface, PCWSTR};
 
 /// hebnix's own page, plugin pages are iframes inside #layers

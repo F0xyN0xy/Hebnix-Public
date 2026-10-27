@@ -3,6 +3,7 @@
 pub mod bindings;
 pub mod dinput;
 pub mod game_actions;
+mod gilrs_hub;
 pub mod keyboard;
 pub mod xinput;
 

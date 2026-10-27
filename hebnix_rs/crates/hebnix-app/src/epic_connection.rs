@@ -93,6 +93,7 @@ impl RepairState {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn repair() -> Result<(), String> {
     crate::winutil::clear_rocket_league_web_cache()
         .map_err(|error| format!("Could not clear Rocket League WebCache: {error}"))?;
@@ -106,6 +107,13 @@ fn repair() -> Result<(), String> {
         return Err(format!("DNS flush exited with {status}"));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn repair() -> Result<(), String> {
+    crate::winutil::clear_rocket_league_web_cache()
+        .map_err(|error| format!("Could not clear Rocket League WebCache: {error}"))?;
+    Err("Epic repair is only available on Windows".to_string())
 }
 
 fn close_rocket_league() -> Result<(), String> {

@@ -1,4 +1,8 @@
 //! rocket league profile client.
+//!
+//! talks to hebnix's own backend proxy (req.hebnix.com), which does the
+//! tracker.gg scraping/impersonation server-side. no local browser
+//! fingerprinting needed on this end anymore.
 
 use std::io::Read;
 use std::sync::Arc;
@@ -12,10 +16,14 @@ use crate::utils::platforms::is_bot;
 
 const PROFILE_API: &str = "https://req.hebnix.com/player";
 const RESPONSE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+// avatars are a few kb, this is only here so a bad url cant use too much memory
+const AVATAR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 pub struct TrackerClient {
     timeout: Duration,
     cache: TtlCache<PlayerStats>,
+    /// avatar bytes by url. only filled from avatar_url on a fetched profile
+    avatars: TtlCache<Arc<[u8]>>,
 }
 
 impl Default for TrackerClient {
@@ -29,9 +37,14 @@ impl TrackerClient {
         Self {
             timeout,
             cache: TtlCache::new(cache_ttl),
+            avatars: TtlCache::new(cache_ttl),
         }
     }
 
+    /// fetch player stats (cache hit returns instantly).
+    ///
+    /// always returns a PlayerStats, check .error / .not_found for failures.
+    /// only Errs on bot or empty primary_id.
     pub fn fetch(&self, primary_id: &str, display_name: &str) -> Result<PlayerStats, String> {
         if primary_id.is_empty() || is_bot(primary_id) {
             return Err(format!("Invalid primary_id: {primary_id:?}"));
@@ -45,6 +58,7 @@ impl TrackerClient {
         if stats.error.is_none() || stats.not_found {
             self.cache.set(primary_id, stats.clone(), None);
         }
+        self.cache_avatar(&stats);
         Ok(stats)
     }
 
@@ -54,6 +68,9 @@ impl TrackerClient {
         self.fetch(primary_id, display_name)
     }
 
+    /// fetch a profile by platform + identifier, e.g. ("steam", "76561198...")
+    /// or ("epic", "SomeDisplayName"). display names work everywhere, steam
+    /// also takes the id64.
     pub fn fetch_profile(&self, platform: &str, identifier: &str) -> Result<PlayerStats, String> {
         let platform = normalize_platform(platform)?;
         let platform_user_id = strip_platform_id(identifier);
@@ -70,6 +87,7 @@ impl TrackerClient {
         if stats.error.is_none() || stats.not_found {
             self.cache.set(cache_key, stats.clone(), None);
         }
+        self.cache_avatar(&stats);
         Ok(stats)
     }
 
@@ -85,16 +103,42 @@ impl TrackerClient {
         self.fetch_profile(&platform, &platform_user_id)
     }
 
+    /// cached stats only, no request.
     pub fn get_cached(&self, primary_id: &str) -> Option<PlayerStats> {
         self.cache.get(primary_id)
     }
 
-    pub fn avatar_bytes(&self, _url: &str) -> Option<Arc<[u8]>> {
-        None
+    pub fn avatar_bytes(&self, url: &str) -> Option<Arc<[u8]>> {
+        self.avatars.get(url)
     }
 
     pub fn clear_cache(&self) {
         self.cache.clear();
+        self.avatars.clear();
+    }
+
+    fn cache_avatar(&self, stats: &PlayerStats) {
+        let Some(url) = stats.avatar_url.as_deref().filter(|url| !url.is_empty()) else {
+            return;
+        };
+        if self.avatars.get(url).is_some() {
+            return;
+        }
+        let Ok(response) = ureq::get(url).timeout(self.timeout).call() else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        if response
+            .into_reader()
+            .take(AVATAR_MAX_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return;
+        }
+        if !bytes.is_empty() {
+            self.avatars.set(url, Arc::from(bytes), None);
+        }
     }
 
     fn fetch_uncached(
@@ -122,15 +166,17 @@ impl TrackerClient {
             urlencode(platform),
             urlencode(platform_user_id)
         );
-        let token = crate::req_auth::app_token()?;
         let agent = ureq::AgentBuilder::new().redirects(0).build();
-        let response = match agent.get(&url)
-            .set("X-App-Token", &token)
+        let mut request = agent
+            .get(&url)
             .set("Accept", "application/json")
-            .set("User-Agent", "Hebnix/2.2.6")
-            .timeout(self.timeout)
-            .call()
-        {
+            .set("User-Agent", "Hebnix-Linux/2.2.6")
+            .timeout(self.timeout);
+        // builds without a baked-in key still send the request, just untokened
+        if let Some(token) = crate::req_auth::app_token_if_configured()? {
+            request = request.set("X-App-Token", &token);
+        }
+        let response = match request.call() {
             Ok(response) => response,
             Err(ureq::Error::Status(404, _)) => {
                 return Err("NOT_FOUND_404: profile service returned 404".to_string());
@@ -252,10 +298,9 @@ fn parse_response(
 fn parse_rank(value: &Value, playlist_id: i64) -> PlaylistRank {
     PlaylistRank {
         playlist_id,
-        playlist_name: crate::utils::playlists::known_name(playlist_id)
-            .or_else(|| string_value(value, "playlist_name"))
-            .map(str::to_owned)
-            .unwrap_or_else(|| crate::utils::playlists::display_name(playlist_id)),
+        playlist_name: string_value(value, "playlist_name")
+            .unwrap_or("")
+            .to_string(),
         tier_id: value.get("tier_id").and_then(number_i64).unwrap_or(0),
         tier_name: string_value(value, "tier_name")
             .unwrap_or("Unranked")
@@ -352,3 +397,63 @@ fn now_unix() -> f64 {
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_ids_use_only_the_platform_account_id() {
+        assert_eq!(
+            identity_from_primary_id("Epic|abc1234|0").unwrap(),
+            ("epic".to_string(), "abc1234".to_string())
+        );
+        assert_eq!(
+            identity_from_primary_id("XboxOne|98765|1").unwrap(),
+            ("xboxone".to_string(), "98765".to_string())
+        );
+    }
+
+    #[test]
+    fn worker_rank_response_exposes_whole_number_mmr() {
+        let data = serde_json::json!({
+            "primary_id": "Switch|5025341852990338613|0",
+            "platform": "Switch",
+            "platform_user_id": "5025341852990338613",
+            "display_name": null,
+            "avatar_url": "https://avatars.cloudflare.steamstatic.com/example_full.jpg",
+            "ranks": {
+                "63": {
+                    "playlist_id": 63,
+                    "playlist_name": "do not use this for matching",
+                    "tier_id": 19,
+                    "tier_name": "Grand Champion I",
+                    "division_id": 2,
+                    "division_name": "III",
+                    "mmr": 1164.0,
+                    "matches_played": 96,
+                    "placement_matches_played": 10,
+                    "win_streak": 4,
+                    "win_streak_type": "win"
+                }
+            }
+        });
+        let stats = parse_response(
+            &data,
+            "Switch|5025341852990338613|0",
+            "",
+            "switch",
+            "5025341852990338613",
+        );
+        let rank = stats.ranks.get(&63).unwrap();
+        assert_eq!(rank.playlist_id, 63);
+        assert_eq!(rank.mmr, 1164);
+        assert_eq!(rank.division_id, 2);
+        assert_eq!(
+            stats.avatar_url.as_deref(),
+            Some("https://avatars.cloudflare.steamstatic.com/example_full.jpg")
+        );
+        assert_eq!(stats.best, "");
+    }
+}
+

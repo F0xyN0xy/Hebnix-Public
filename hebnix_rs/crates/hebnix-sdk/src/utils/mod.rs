@@ -3,7 +3,6 @@
 pub mod constants;
 pub mod paths;
 pub mod platforms;
-pub mod playlists;
 pub mod psynet;
 pub mod ranks;
 pub mod system_settings;

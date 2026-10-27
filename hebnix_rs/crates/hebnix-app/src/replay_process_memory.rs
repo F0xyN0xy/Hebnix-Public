@@ -4,12 +4,17 @@
 //! injection. toolhelp snapshot + VirtualQueryEx/ReadProcessMemory walk over
 //! committed readable pages.
 
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQueryEx};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_VM_READ,

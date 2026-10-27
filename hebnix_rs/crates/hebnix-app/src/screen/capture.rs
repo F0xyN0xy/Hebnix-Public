@@ -5,30 +5,46 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
 use windows::Foundation::TimeSpan;
+#[cfg(target_os = "windows")]
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess,
     GraphicsCaptureAccessKind, GraphicsCaptureItem, GraphicsCaptureSession,
 };
+#[cfg(target_os = "windows")]
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
+#[cfg(target_os = "windows")]
 use windows::Graphics::DirectX::DirectXPixelFormat;
+#[cfg(target_os = "windows")]
 use windows::Graphics::SizeInt32;
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{HWND, RECT};
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+#[cfg(target_os = "windows")]
 use windows::core::{Interface, Result};
 
 use super::{Frame, IDLE_STOP, Service};

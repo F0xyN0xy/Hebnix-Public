@@ -25,10 +25,7 @@ pub struct LogGameInfo {
     pub game_class: Option<String>,
     pub map_name: Option<String>,
     pub game_tags: Option<String>,
-    pub mutators: Vec<String>,
-    pub bot_skill: Option<String>,
-    pub player_count: Option<i64>, 
-    pub mutator_count: i64,
+    /// exhibition/season loads write ?Offline? on the map load
     pub offline: bool,
     pub server_name: Option<String>,
     pub region: Option<String>,
@@ -41,7 +38,6 @@ pub struct LogGameInfo {
 pub struct LogInfo {
     pub session: LogSessionInfo,
     pub game: Option<LogGameInfo>,
-    pub build_id: Option<String>,
     pub log_path: Option<String>,
     pub parse_time: f64,
     pub stats_api_available: bool,

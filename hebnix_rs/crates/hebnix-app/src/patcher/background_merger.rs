@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use serde::{Deserialize, Serialize};

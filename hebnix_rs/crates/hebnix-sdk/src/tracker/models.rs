@@ -1,4 +1,4 @@
-//! typed models for rocket league profile responses.
+//! typed models for tracker.gg responses.
 
 use std::collections::HashMap;
 
@@ -11,7 +11,7 @@ pub struct PlaylistRank {
     pub playlist_name: String,
     pub tier_id: i64,
     pub tier_name: String,
-    /// 0-3
+    /// 1-4
     pub division_id: i64,
     pub division_name: String,
     pub mmr: i64,
@@ -30,7 +30,7 @@ pub struct PlaylistRank {
     pub rank_percentile: f64,
 }
 
-/// lifetime stats when supplied by the profile service.
+/// lifetime stats from the overview segment.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifetimeStats {
     pub wins: i64,
@@ -45,7 +45,7 @@ pub struct LifetimeStats {
     pub season_reward_wins: i64,
 }
 
-/// per-playlist averages when supplied by the profile service.
+/// per-playlist averages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaylistAverage {
     pub playlist_id: i64,
@@ -62,7 +62,7 @@ pub struct PlaylistAverage {
     pub assists_goals_ratio: f64,
 }
 
-/// full player profile from the rank service.
+/// full player profile from tracker.gg.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerStats {
     pub primary_id: String,
@@ -76,8 +76,10 @@ pub struct PlayerStats {
     pub ranks: HashMap<i64, PlaylistRank>,
     pub lifetime: Option<LifetimeStats>,
     pub averages: HashMap<i64, PlaylistAverage>,
+    /// iso-8601 string from the api's lastUpdated field.
     pub last_updated: Option<String>,
     pub current_season: i64,
+    /// unix secs when this profile was fetched.
     pub fetched_at: f64,
     pub cached: bool,
     pub season_reward_level: i64,

@@ -8,8 +8,11 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
+#[cfg(target_os = "windows")]
 use webview2_com::take_pwstr;
+#[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
 
 const BOOTSTRAPPER: &str = "MicrosoftEdgeWebview2Setup.exe";
@@ -132,12 +135,16 @@ pub fn ensure_present() -> bool {
 /// not Command: CreateProcess fails with ERROR_ELEVATION_REQUIRED instead of
 /// raising the uac prompt
 fn run_installer(installer: &std::path::Path) -> Result<(), String> {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
-    use windows::Win32::UI::Shell::{
+    #[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    #[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    #[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::{
         SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
     };
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    #[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
     let file: Vec<u16> = format!("{}\0", installer.display())

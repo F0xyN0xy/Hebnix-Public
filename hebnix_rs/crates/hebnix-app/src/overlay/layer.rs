@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use std::mem::ManuallyDrop;
 use windows::Win32::Graphics::Direct2D::{
     Common::D2D_RECT_F, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_LAYER_OPTIONS1_NONE,

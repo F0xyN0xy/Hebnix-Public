@@ -46,10 +46,39 @@ fn token_at(key: &str, unix_seconds: u64) -> Result<String, String> {
     Ok(format!("{digest:x}"))
 }
 
+/// `Ok(None)` when this build carries no key (dev builds without a
+/// `req_key.txt`), so callers can still send an untokened request.
+pub fn app_token_if_configured() -> Result<Option<String>, String> {
+    if KEY.trim().is_empty() {
+        return Ok(None);
+    }
+    app_token().map(Some)
+}
+
 pub fn app_token() -> Result<String, String> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is before Unix epoch")?
         .as_secs();
     token_at(KEY, seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 6238 appendix B SHA-1 secret ("12345678901234567890") in Base32;
+    // at T=59 the 8-digit code is 94287082.
+    const RFC_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+    #[test]
+    fn token_is_md5_of_the_8_digit_totp() {
+        let token = token_at(RFC_SECRET, 59).unwrap();
+        assert_eq!(token, format!("{:x}", Md5::digest(b"94287082")));
+    }
+
+    #[test]
+    fn missing_key_is_an_error() {
+        assert!(token_at("", 59).is_err());
+    }
 }

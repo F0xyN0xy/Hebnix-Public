@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 //! Limit background event handling so bursts leave time for input and painting.
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;

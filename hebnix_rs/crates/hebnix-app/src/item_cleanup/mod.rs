@@ -82,7 +82,8 @@ impl Cleaner {
             options.read(true).write(true).create(true).truncate(false);
             #[cfg(windows)]
             {
-                use std::os::windows::fs::OpenOptionsExt;
+                #[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
                 options.share_mode(0);
             }
             locks.push(options.open(base.join("items.lock")).map_err(|_| {

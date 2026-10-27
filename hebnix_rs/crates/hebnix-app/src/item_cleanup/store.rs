@@ -139,11 +139,14 @@ pub(super) fn atomic_save(path: &Path, value: &ItemStore) -> Result<(), String> 
 
 #[cfg(windows)]
 pub(super) fn replace(source: &Path, target: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
+    #[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+    #[cfg(target_os = "windows")]
+use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
-    use windows::core::PCWSTR;
+    #[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
     let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let target: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {

@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use super::{Rgba, dcomp, gdi};
 use crate::plugins::window_capture::CapturedFrame;
 use std::cell::RefCell;

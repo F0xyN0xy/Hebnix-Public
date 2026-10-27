@@ -160,12 +160,9 @@ fn reader_writer_loop(
             }
         };
 
-        // Commands belong to one socket session. Replaying a queued pause/seek after
-        // reconnecting can override a newer playback request from the UI.
-        while cmd_rx.try_recv().is_ok() {}
         connected.store(true, Ordering::Relaxed);
 
-        'connection: while running.load(Ordering::Relaxed) {
+        while running.load(Ordering::Relaxed) {
             match socket.read() {
                 Ok(Message::Text(text)) => {
                     if let Ok(event) = parse_message(text.as_bytes()) {
@@ -194,7 +191,7 @@ fn reader_writer_loop(
             while let Ok(cmd) = cmd_rx.try_recv() {
                 if let Ok(json) = serde_json::to_string(&cmd) {
                     if socket.send(Message::Text(json.into())).is_err() {
-                        break 'connection;
+                        break;
                     }
                 }
             }

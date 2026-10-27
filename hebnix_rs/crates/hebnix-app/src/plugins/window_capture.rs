@@ -10,21 +10,27 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetWindowDC, HALFTONE, HGDIOBJ, ReleaseDC, SRCCOPY,
     SelectObject, SetStretchBltMode, StretchBlt,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, EnumWindows, GetCursorInfo, GetIconInfo,
     GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, HICON, ICONINFO, IsWindow, IsWindowVisible, SM_CXCURSOR, SM_CYCURSOR,
 };
+#[cfg(target_os = "windows")]
 use windows::core::BOOL;
 
 const MAX_CAPTURE_FPS: u32 = 30;

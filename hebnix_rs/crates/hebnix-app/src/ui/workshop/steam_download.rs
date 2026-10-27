@@ -12,7 +12,6 @@
 
 use crate::i18n::{t, t_args};
 use std::io::{BufRead, BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -33,7 +32,6 @@ const STEAM_DETAILS_URL: &str =
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const RL_APPID: &str = "252950";
 const SETTINGS_FILE: &str = "steam_download.json";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LOG_LINES: usize = 200;
@@ -266,38 +264,94 @@ pub fn parse_key(text: &str) -> Option<String> {
 
 // environment
 
-/// DepotDownloaderMod is extracted with the multiplayer bundle after the
-/// player connects to Workshop multiplayer.
-fn find_depot_downloader() -> Option<PathBuf> {
-    let dll = crate::config::base_dir()
-        .join("multiplayer-lan")
-        .join("depotdownloader")
-        .join("DepotDownloaderMod.dll");
-    dll.is_file().then_some(dll)
+/// where DepotDownloaderMod is looked for (the first one wins)
+fn depot_downloader_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![crate::config::base_dir().join("depotdownloader")];
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        dirs.push(exe_dir.join("depotdownloader"));
+    }
+    dirs
 }
 
-/// installs the newest .net runtime through winget
-pub const DOTNET_INSTALL_COMMAND: &str = "winget install --id Microsoft.DotNet.Runtime.10 \
-     --exact --accept-source-agreements --accept-package-agreements";
+/// DepotDownloaderMod lives in a `depotdownloader` folder in Hebnix's config
+/// folder (or beside the Hebnix binary)
+fn find_depot_downloader() -> Option<PathBuf> {
+    depot_downloader_dirs()
+        .into_iter()
+        .map(|dir| dir.join("DepotDownloaderMod.dll"))
+        .find(|dll| dll.is_file())
+}
 
-/// opens a visible powershell window running `command`; the window stays
-/// open afterwards so its output can be read
+/// the distro's own .net runtime package, from /etc/os-release
+pub fn dotnet_install_command() -> Option<&'static str> {
+    let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    install_command_for(&release)
+}
+
+fn install_command_for(os_release: &str) -> Option<&'static str> {
+    let ids: Vec<String> = os_release
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("ID=")
+                .or_else(|| line.strip_prefix("ID_LIKE="))
+        })
+        .flat_map(|value| {
+            value
+                .trim_matches('"')
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let has = |id: &str| ids.iter().any(|value| value == id);
+    if has("arch") {
+        Some("sudo pacman -S --needed dotnet-runtime")
+    } else if has("fedora") {
+        Some("sudo dnf install dotnet-runtime-9.0")
+    } else if has("debian") || has("ubuntu") {
+        Some("sudo apt install dotnet-runtime-9.0")
+    } else {
+        None
+    }
+}
+
+/// opens a terminal running `command`; it stays open afterwards (a shell is
+/// started once the command finishes) so its output can be read
 fn run_in_terminal(command: &str) {
-    let _ = Command::new("cmd")
-        .args([
-            "/C",
-            "start",
-            "Install .NET",
-            "powershell",
-            "-NoExit",
-            "-Command",
-            command,
-        ])
-        .spawn();
+    let script = format!("{command}; exec \"${{SHELL:-sh}}\"");
+    let mut terminals: Vec<String> = std::env::var("TERMINAL").ok().into_iter().collect();
+    terminals.extend(
+        [
+            "xdg-terminal-exec",
+            "kitty",
+            "alacritty",
+            "foot",
+            "wezterm",
+            "konsole",
+            "gnome-terminal",
+            "xterm",
+        ]
+        .map(String::from),
+    );
+    for terminal in terminals {
+        let mut cmd = Command::new(&terminal);
+        match terminal.as_str() {
+            "gnome-terminal" => cmd.arg("--"),
+            "wezterm" => cmd.arg("start"),
+            "konsole" | "xterm" => cmd.arg("-e"),
+            _ => &mut cmd,
+        };
+        if cmd.args(["sh", "-c", &script]).spawn().is_ok() {
+            return;
+        }
+    }
 }
 
 /// the newest .net runtime version in `dotnet --list-runtimes` output
-/// (lines like "Microsoft.NETCore.App 10.0.8 [C:\Program Files\dotnet\...]")
+/// (lines like "Microsoft.NETCore.App 10.0.8 [/usr/share/dotnet/shared/...]")
 pub fn highest_runtime_major(list: &str) -> Option<u32> {
     list.lines()
         .filter_map(|line| line.strip_prefix("Microsoft.NETCore.App "))
@@ -309,17 +363,18 @@ pub fn highest_runtime_major(list: &str) -> Option<u32> {
 /// than asking `dotnet --version`, which fails when only runtimes (no SDK)
 /// are installed.
 fn find_dotnet() -> Result<PathBuf, String> {
-    let mut candidates = vec![PathBuf::from("dotnet")];
-    for var in ["ProgramFiles", "ProgramW6432"] {
-        if let Some(root) = std::env::var_os(var) {
-            candidates.push(Path::new(&root).join("dotnet").join("dotnet.exe"));
-        }
+    let mut candidates = vec![
+        PathBuf::from("dotnet"),
+        PathBuf::from("/usr/share/dotnet/dotnet"),
+        PathBuf::from("/usr/lib/dotnet/dotnet"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".dotnet").join("dotnet"));
     }
     let mut found_older = None;
     for candidate in candidates {
         let Ok(output) = Command::new(&candidate)
             .arg("--list-runtimes")
-            .creation_flags(CREATE_NO_WINDOW)
             .stderr(Stdio::null())
             .output()
         else {
@@ -463,7 +518,6 @@ fn run_depot_downloader(
         .args(["-max-downloads", MAX_DOWNLOADS])
         // the tool targets .net 9; let a newer installed runtime run it
         .env("DOTNET_ROLL_FORWARD", "Major")
-        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -524,10 +578,13 @@ fn download_item(
     work_dir: &Path,
     log: Log,
 ) -> Result<Downloaded, String> {
-    let dll = find_depot_downloader().ok_or(
-        "DepotDownloaderMod wasn't found. It should be in a 'depotdownloader' folder \
-         next to hebnix.exe.",
-    )?;
+    let dll = find_depot_downloader().ok_or_else(|| {
+        format!(
+            "DepotDownloaderMod wasn't found. Put its files (DepotDownloaderMod.dll and the rest) \
+             in {}.",
+            depot_downloader_dirs()[0].display()
+        )
+    })?;
     log(&t("download-item-looking-up-the-workshop-item-on"));
     let details = fetch_details(wid)?;
     log(&format!("Found \"{}\".", details.title));
@@ -758,17 +815,19 @@ impl SteamDownloader {
                 Some(Err(error)) => {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                     if shared.needs_dotnet {
-                        ui.small(t("render-to-install-it-with-winget-run"));
-                        ui.code(DOTNET_INSTALL_COMMAND);
-                        ui.horizontal(|ui| {
-                            if ui.button(t("render-run-in-terminal")).clicked() {
-                                run_in_terminal(DOTNET_INSTALL_COMMAND);
-                            }
-                            if ui.button(t("render-copy-command")).clicked() {
-                                ui.ctx().copy_text(DOTNET_INSTALL_COMMAND.to_string());
-                            }
-                            ui.small(t("render-when-it-finishes-click-download-map"));
-                        });
+                        if let Some(command) = dotnet_install_command() {
+                            ui.small("To install it, run this in a terminal:");
+                            ui.code(command);
+                            ui.horizontal(|ui| {
+                                if ui.button("Run in terminal").clicked() {
+                                    run_in_terminal(command);
+                                }
+                                if ui.button("Copy command").clicked() {
+                                    ui.ctx().copy_text(command.to_string());
+                                }
+                                ui.small("When it finishes, click Download map again.");
+                            });
+                        }
                     }
                 }
                 None => {}
@@ -804,5 +863,198 @@ impl SteamDownloader {
             );
         }
         imported
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hebnix_steam_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, size: usize) {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![1u8; size]).unwrap();
+    }
+
+    #[test]
+    fn typed_keys_are_read_strictly() {
+        assert_eq!(
+            parse_key("  abc-DEF_1.2\r\n").as_deref(),
+            Some("abc-DEF_1.2")
+        );
+        assert_eq!(parse_key(""), None);
+        assert_eq!(parse_key("two words"), None);
+        assert_eq!(parse_key("key\nsecond-line"), None);
+        assert_eq!(parse_key("bad;chars"), None);
+    }
+
+    #[test]
+    fn workshop_ids_come_from_numbers_and_links() {
+        assert_eq!(
+            parse_workshop_id("2968144588").as_deref(),
+            Some("2968144588")
+        );
+        assert_eq!(
+            parse_workshop_id(
+                " https://steamcommunity.com/sharedfiles/filedetails/?id=2968144588&searchtext=x "
+            )
+            .as_deref(),
+            Some("2968144588")
+        );
+        assert_eq!(
+            parse_workshop_id("https://steamcommunity.com/workshop/filedetails/?l=english&id=42")
+                .as_deref(),
+            Some("42")
+        );
+        assert_eq!(parse_workshop_id(""), None);
+        assert_eq!(parse_workshop_id("not a link"), None);
+        assert_eq!(parse_workshop_id("12abc"), None);
+    }
+
+    #[test]
+    fn only_rocket_league_items_are_accepted() {
+        let reply = |app: Value, result: i64| {
+            json!({ "response": { "publishedfiledetails": [{
+                "result": result, "consumer_app_id": app, "title": "Cool Map",
+                "creator": "7656", "description": "[h1]Hi[/h1] there [b]friend[/b]",
+                "preview_url": "https://x/y.jpg"
+            }]}})
+        };
+        let ok = parse_details(&reply(json!(252950), 1), "1").unwrap();
+        assert_eq!(ok.title, "Cool Map");
+        assert_eq!(ok.description, "Hi there friend");
+        // steam sometimes sends ids as strings
+        assert!(parse_details(&reply(json!("252950"), 1), "1").is_ok());
+        assert!(
+            parse_details(&reply(json!(730), 1), "1")
+                .unwrap_err()
+                .contains("Rocket League")
+        );
+        assert!(parse_details(&reply(json!(252950), 9), "1").is_err());
+        assert!(parse_details(&json!({}), "1").is_err());
+    }
+
+    #[test]
+    fn the_install_command_follows_the_distro() {
+        assert_eq!(
+            install_command_for("ID=arch\n"),
+            Some("sudo pacman -S --needed dotnet-runtime")
+        );
+        assert_eq!(
+            install_command_for("ID=cachyos\nID_LIKE=arch\n"),
+            Some("sudo pacman -S --needed dotnet-runtime")
+        );
+        assert_eq!(
+            install_command_for("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"),
+            Some("sudo apt install dotnet-runtime-9.0")
+        );
+        assert_eq!(
+            install_command_for("ID=fedora\n"),
+            Some("sudo dnf install dotnet-runtime-9.0")
+        );
+        assert_eq!(install_command_for("ID=gentoo\n"), None);
+    }
+
+    #[test]
+    fn the_newest_dotnet_runtime_is_picked_from_the_list() {
+        let list = "Microsoft.AspNetCore.App 11.0.1 [C:\\a]\r\n\
+                    Microsoft.NETCore.App 6.0.36 [C:\\Program Files\\dotnet\\shared]\r\n\
+                    Microsoft.NETCore.App 10.0.8 [C:\\Program Files\\dotnet\\shared]\r\n\
+                    Microsoft.WindowsDesktop.App 12.0.0 [C:\\b]\r\n";
+        assert_eq!(highest_runtime_major(list), Some(10));
+        assert_eq!(
+            highest_runtime_major("Microsoft.NETCore.App 8.0.27 [x]"),
+            Some(8)
+        );
+        assert_eq!(highest_runtime_major(""), None);
+        assert_eq!(highest_runtime_major("No .NET runtimes found"), None);
+    }
+
+    #[test]
+    fn the_item_info_file_is_read_in_any_letter_case() {
+        let info = parse_item_info(
+            "\u{feff}{\"Title\":\"Cool Map\",\"AUTHOR\":\"Someone\",\"description\":\"[b]Fun[/b] map\"}",
+        )
+        .unwrap();
+        assert_eq!(info.title, "Cool Map");
+        assert_eq!(info.author, "Someone");
+        assert_eq!(info.description, "Fun map");
+        assert_eq!(parse_item_info("{}"), None);
+        assert_eq!(parse_item_info("not json"), None);
+    }
+
+    #[test]
+    fn the_item_info_file_is_found_inside_the_download() {
+        let dir = temp_dir("iteminfo");
+        write(&dir, "sub/Cool.upk", 100);
+        std::fs::write(dir.join("sub/WorkshopItemInfo.json"), "{\"Author\":\"Me\"}").unwrap();
+        assert_eq!(read_item_info(&dir).unwrap().author, "Me");
+        assert_eq!(read_item_info(&temp_dir("noinfo")), None);
+    }
+
+    #[test]
+    fn bbcode_is_stripped_but_plain_brackets_stay() {
+        assert_eq!(
+            strip_bbcode("[url=https://a.b]link[/url] and [i]x[/i]"),
+            "link and x"
+        );
+        assert_eq!(strip_bbcode("scores [1, 2] here"), "scores [1, 2] here");
+        assert_eq!(strip_bbcode("open [ bracket"), "open [ bracket");
+    }
+
+    #[test]
+    fn manifest_headers_are_validated() {
+        let key = "ab12".repeat(16);
+        let ok = validate_manifest(Some("252950"), Some("123456789"), Some(&key)).unwrap();
+        assert_eq!(ok.app_id, "252950");
+        assert!(validate_manifest(Some("../x"), Some("1"), Some(&key)).is_err());
+        assert!(validate_manifest(Some("1"), Some("1;rm"), Some(&key)).is_err());
+        assert!(validate_manifest(Some("1"), Some("1"), Some("zz")).is_err());
+        assert!(validate_manifest(None, Some("1"), Some(&key)).is_err());
+    }
+
+    #[test]
+    fn the_map_is_the_biggest_real_file() {
+        let dir = temp_dir("map");
+        write(&dir, "MapTemplates.upk", 9_000);
+        write(&dir, "EditorLandscapeResources.upk", 8_000);
+        write(&dir, "WorkshopItemInfo.json", 5_000);
+        write(&dir, "art/Preview.jpg", 20_000);
+        write(&dir, "sub/Cool.upk", 3_000);
+        write(&dir, "sub/notes.txt", 7_000);
+        assert_eq!(
+            find_map_file(&dir).unwrap().file_name().unwrap(),
+            "Cool.upk"
+        );
+    }
+
+    #[test]
+    fn without_a_package_the_biggest_other_file_is_used() {
+        let dir = temp_dir("fallback");
+        write(&dir, "a.bin", 10);
+        write(&dir, "b.bin", 500);
+        assert_eq!(find_map_file(&dir).unwrap().file_name().unwrap(), "b.bin");
+        assert_eq!(find_map_file(&temp_dir("empty")), None);
+    }
+
+    #[test]
+    fn the_bundled_preview_prefers_its_name() {
+        let dir = temp_dir("preview");
+        write(&dir, "icon.png", 100);
+        write(&dir, "big.png", 9_000);
+        write(&dir, "MapPreview.jpg", 3_000);
+        assert_eq!(
+            find_bundled_preview(&dir).unwrap().file_name().unwrap(),
+            "MapPreview.jpg"
+        );
+        assert_eq!(find_bundled_preview(&temp_dir("nopic")), None);
     }
 }
