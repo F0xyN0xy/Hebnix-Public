@@ -494,6 +494,9 @@ impl MenuMapState {
             ui.add_enabled_ui(self.camera_on && ready, |ui| {
                 let label = |camera: &MenuCamera| match camera_purpose(&camera.tag) {
                     Some(purpose) => format!("{purpose} ({})", camera.name),
+                    None if camera.name == PRESS_ANY_BUTTON_CAMERA => {
+                        format!("PressAnyButtonToStart ({})", camera.name)
+                    }
                     None if camera.tag.is_empty() || camera.tag == "CameraActor" => {
                         camera.name.clone()
                     }
@@ -769,6 +772,9 @@ impl MenuMapState {
         }
     }
 }
+
+/// The camera on the press any button screen. The menu level gives it no tag.
+const PRESS_ANY_BUTTON_CAMERA: &str = "CameraActor_8";
 
 /// What a tagged menu camera shows, where it has been checked in game.
 fn camera_purpose(tag: &str) -> Option<String> {
