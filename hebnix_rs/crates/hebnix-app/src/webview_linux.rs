@@ -472,3 +472,52 @@ mod page_url_tests {
         assert_eq!(page_url(Path::new("/a"), "x.html"), "file:///a/x.html");
     }
 }
+
+pub mod runtime {
+    // no WebView2 on Linux
+    pub fn is_available() -> bool {
+        false
+    }
+
+    pub fn ensure_present() {}
+}
+
+/// Windows composes the plugin pages into the overlay window; here the pages
+/// go through `WebviewOverlay` instead, so this is never constructed.
+pub mod host {
+    pub struct WebviewHost;
+
+    impl WebviewHost {
+        pub fn new(_visual: ()) -> Self {
+            Self
+        }
+
+        pub fn sync_pages<T>(&mut self, _pages: &[T]) {}
+
+        pub fn deliver<T>(&self, _slug: &str, _data: T) -> Result<(), String> {
+            Ok(())
+        }
+
+        pub fn status(&self) -> String {
+            "unsupported".into()
+        }
+
+        pub fn wants_input(&self) -> bool {
+            false
+        }
+
+        pub fn wants_overlay(&self) -> bool {
+            false
+        }
+
+        pub fn is_ready(&self) -> bool {
+            false
+        }
+
+        pub fn tick(&mut self, _target: (), _size: (u32, u32), _visible: bool) {}
+
+        pub fn take_error(&mut self) -> Option<String> {
+            None
+        }
+    }
+}

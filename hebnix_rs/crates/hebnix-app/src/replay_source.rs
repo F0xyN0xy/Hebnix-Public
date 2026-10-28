@@ -15,7 +15,11 @@ use std::{
 };
 use tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig};
 
+#[cfg(target_os = "windows")]
 #[path = "replay_process_memory.rs"]
+mod memory;
+#[cfg(target_os = "linux")]
+#[path = "replay_process_memory_linux.rs"]
 mod memory;
 
 #[derive(Clone, Debug)]

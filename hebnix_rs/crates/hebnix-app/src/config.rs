@@ -114,6 +114,7 @@ impl Default for SettingsCfg {
 pub enum RlLaunchMode {
     #[default]
     Unconfigured,
+    #[serde(alias = "steam_proton")]
     SteamNative,
     EpicDirect,
     SteamShortcutToHeroic,

@@ -61,6 +61,7 @@ pub fn register_and_queue_from_args(base_dir: &Path) {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn register_protocol() -> Result<(), String> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
@@ -84,6 +85,42 @@ fn register_protocol() -> Result<(), String> {
     command
         .set_value("", &format!("\"{executable}\" \"%1\""))
         .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+/// Register this binary as the `hebnix://` handler for the current user
+/// (a .desktop entry + xdg-mime default). Idempotent: only rewrites the
+/// entry when the executable path changed.
+fn register_protocol() -> Result<(), String> {
+    // an AppImage's current_exe is a throwaway mount; register the image itself
+    let executable = match std::env::var_os("APPIMAGE").filter(|value| !value.is_empty()) {
+        Some(image) => std::path::PathBuf::from(image),
+        None => std::env::current_exe().map_err(|error| error.to_string())?,
+    };
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| "application path is not valid Unicode".to_string())?;
+    let applications = dirs::data_dir()
+        .ok_or_else(|| "no XDG data directory".to_string())?
+        .join("applications");
+    let entry = applications.join("hebnix-url-handler.desktop");
+    let contents = format!(
+        "[Desktop Entry]\nType=Application\nName=Hebnix Installer\nExec=\"{}\" %u\n\
+         NoDisplay=true\nTerminal=false\nMimeType=x-scheme-handler/hebnix;\n",
+        executable.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    if std::fs::read_to_string(&entry).ok().as_deref() == Some(contents.as_str()) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&applications).map_err(|error| error.to_string())?;
+    std::fs::write(&entry, contents).map_err(|error| error.to_string())?;
+    let _ = std::process::Command::new("xdg-mime")
+        .args(["default", "hebnix-url-handler.desktop", "x-scheme-handler/hebnix"])
+        .status();
+    let _ = std::process::Command::new("update-desktop-database")
+        .arg(&applications)
+        .status();
     Ok(())
 }
 

@@ -1,0 +1,5 @@
+Hebnix
+Copyright 2026 @nixvio64 and @hebbins
+
+This product includes software developed for the Hebnix project
+(https://github.com/HebnixRL/Hebnix-Public).

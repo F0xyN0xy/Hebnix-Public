@@ -1,19 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
-#[cfg(target_os = "windows")]
 mod auto_upload_replays;
-#[cfg(target_os = "windows")]
 mod replay_metadata;
-#[cfg(target_os = "windows")]
 mod replay_scan;
-#[cfg(target_os = "windows")]
 mod replay_timeline;
-#[cfg(target_os = "windows")]
 mod replay_source;
-#[cfg(target_os = "windows")]
 mod replay_history_log;
 #[cfg(target_os = "windows")]
+mod replay_history_patch;
+#[cfg(target_os = "linux")]
+#[path = "replay_history_patch_linux.rs"]
 mod replay_history_patch;
 mod patcher;
 mod ball {
@@ -22,7 +19,6 @@ mod ball {
 mod boost_patcher {
     pub use crate::patcher::boost_patcher::*;
 }
-#[cfg(target_os = "windows")]
 mod car_patcher {
     pub use crate::patcher::car_patcher::*;
 }
@@ -31,15 +27,12 @@ mod colours {
     pub use crate::patcher::colours::*;
 }
 mod config;
-#[cfg(target_os = "windows")]
 mod cosmetic_thumbnail {
     pub use crate::patcher::cosmetic_thumbnail::*;
 }
-#[cfg(target_os = "windows")]
 mod cosmetic_upk {
     pub use crate::patcher::cosmetic_upk::*;
 }
-#[cfg(target_os = "windows")]
 mod decal_patcher {
     pub use crate::patcher::decal_patcher::*;
 }
@@ -51,7 +44,6 @@ mod dpi_fix;
 #[cfg(target_os = "linux")]
 #[path = "dpi_fix_linux.rs"]
 mod dpi_fix;
-#[cfg(target_os = "windows")]
 mod epic_connection;
 #[cfg(target_os = "windows")]
 mod hotkey;
@@ -68,7 +60,6 @@ mod monitor;
 #[cfg(target_os = "linux")]
 #[path = "monitor_linux.rs"]
 mod monitor;
-#[cfg(target_os = "windows")]
 mod multiplayer_assets;
 #[cfg(target_os = "windows")]
 #[path = "multiplayer-lan/mod.rs"]
@@ -93,8 +84,11 @@ mod rl_launch;
 #[cfg(target_os = "linux")]
 #[path = "rl_launch_linux.rs"]
 mod rl_launch;
-mod recovery_tasks;
 #[cfg(target_os = "windows")]
+mod recovery_tasks;
+#[cfg(target_os = "linux")]
+#[path = "recovery_tasks_linux.rs"]
+mod recovery_tasks;
 mod runtime_assets;
 mod screen;
 #[cfg(target_os = "windows")]
@@ -113,7 +107,6 @@ mod theme;
 mod toast;
 mod tray;
 mod ui;
-#[cfg(target_os = "windows")]
 mod ui_work;
 mod update;
 mod upk_keys {
@@ -135,6 +128,10 @@ mod window_state;
 #[cfg(target_os = "linux")]
 #[path = "window_state_linux.rs"]
 mod window_state;
+#[cfg(target_os = "windows")]
+mod visibility;
+#[cfg(target_os = "linux")]
+#[path = "visibility_linux.rs"]
 mod visibility;
 
 use app::HebnixApp;
