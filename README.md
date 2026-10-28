@@ -58,22 +58,6 @@ cd hebnix_rs
 cargo build --release
 ```
 
-### Build
-```bash
-./build.sh # Auto-detect platform
-./build.sh linux  # Force Linux
-./build.sh windows # Force Windows
-make linux # Using Makefile
-make windows # Using Makefile
-```
-
-## Repository Structure
-
-- `hebnix_rs/` - Windows version and shared codebase
-- `hebnix_linux/` - Linux port with Wayland/X11 support
-- `merge_hebnix.sh` / `merge_hebnix.py` - Scripts to sync changes from Windows to Linux
-- `.github/workflows/` - CI/CD for both platforms
-
 ## Linux-Specific Features
 
 - Wayland support (wlr-layer-shell for overlays)
