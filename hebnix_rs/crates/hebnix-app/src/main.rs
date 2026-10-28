@@ -1,19 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
-#[cfg(target_os = "windows")]
 mod auto_upload_replays;
-#[cfg(target_os = "windows")]
 mod replay_metadata;
-#[cfg(target_os = "windows")]
 mod replay_scan;
-#[cfg(target_os = "windows")]
 mod replay_timeline;
-#[cfg(target_os = "windows")]
 mod replay_source;
-#[cfg(target_os = "windows")]
 mod replay_history_log;
 #[cfg(target_os = "windows")]
+mod replay_history_patch;
+#[cfg(target_os = "linux")]
+#[path = "replay_history_patch_linux.rs"]
 mod replay_history_patch;
 mod patcher;
 mod ball {
@@ -47,7 +44,6 @@ mod dpi_fix;
 #[cfg(target_os = "linux")]
 #[path = "dpi_fix_linux.rs"]
 mod dpi_fix;
-#[cfg(target_os = "windows")]
 mod epic_connection;
 #[cfg(target_os = "windows")]
 mod hotkey;

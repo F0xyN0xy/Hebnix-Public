@@ -373,6 +373,12 @@ impl AutoUploadReplays {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::rename(from, to).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "windows")]
 fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{

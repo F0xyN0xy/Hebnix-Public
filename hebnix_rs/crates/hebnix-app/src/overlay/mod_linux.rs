@@ -11,7 +11,7 @@
 //! all; that was wrong (or described some other compositor's behavior) and
 //! led to a since-reverted "force RL out of fullscreen" workaround here
 //! that broke Hyprland's native hide-bars-during-fullscreen behavior for
-//! no reason. Layer-shell's `Overlay` layer sits above `top` (where bars
+//! no reason. Layer-shell's `NativeOverlay` layer sits above `top` (where bars
 //! like waybar live) specifically so it stays visible regardless of what
 //! else the compositor is hiding.
 
@@ -563,7 +563,7 @@ pub fn capture_image(
 /// the platform backend: wlr-layer-shell on Wayland, an ARGB window on X11
 enum Backend {
     Wayland(wayland::WaylandOverlay),
-    X11(x11::X11Overlay),
+    X11(x11::X11NativeOverlay),
 }
 
 impl Backend {
@@ -602,21 +602,21 @@ impl Backend {
             return wayland::WaylandOverlay::new().map(Backend::Wayland);
         }
         if std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()) {
-            return x11::X11Overlay::new().map(Backend::X11);
+            return x11::X11NativeOverlay::new().map(Backend::X11);
         }
         Err("no WAYLAND_DISPLAY or DISPLAY set".to_string())
     }
 }
 
 /// the overlay window
-pub struct Overlay {
+pub struct NativeOverlay {
     backend: Option<Backend>,
     last_reconnect: Option<std::time::Instant>,
     /// the last presented frame, None while hidden
     last_frame: Option<Pixmap>,
 }
 
-impl Overlay {
+impl NativeOverlay {
     pub fn new() -> Self {
         match Backend::create() {
             Ok(backend) => {
@@ -627,7 +627,7 @@ impl Overlay {
                         Backend::X11(_) => "X11",
                     }
                 );
-                Overlay { backend: Some(backend), last_reconnect: None, last_frame: None }
+                NativeOverlay { backend: Some(backend), last_reconnect: None, last_frame: None }
             }
             Err(e) => {
                 tracing::warn!(
@@ -635,7 +635,7 @@ impl Overlay {
                      Wayland compositor with wlr-layer-shell (Hyprland, Sway, ...), or an X11 \
                      session with a compositing manager (Cinnamon, XFCE, i3 + picom, ...)."
                 );
-                Overlay {
+                NativeOverlay {
                     backend: None,
                     last_reconnect: Some(std::time::Instant::now()),
                     last_frame: None,
@@ -726,7 +726,7 @@ impl Overlay {
     }
 }
 
-impl Default for Overlay {
+impl Default for NativeOverlay {
     fn default() -> Self {
         Self::new()
     }
@@ -734,7 +734,7 @@ impl Default for Overlay {
 
 /// hide the overlay now if it's visible. Safe from any thread on Windows
 /// (raw HWND + ShowWindow); on Linux the overlay backend lives on the main
-/// thread only, so this just delegates to the same `Overlay::hide` path via
+/// thread only, so this just delegates to the same `NativeOverlay::hide` path via
 /// a flag the main loop checks, keeping the call site (monitor.rs) unchanged.
 static FORCE_HIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -742,7 +742,7 @@ pub fn enforce_hidden() {
     FORCE_HIDE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// consumed by the main loop each tick; true means `Overlay::hide()` should
+/// consumed by the main loop each tick; true means `NativeOverlay::hide()` should
 /// be called (and the flag is cleared).
 #[doc(hidden)]
 pub fn take_force_hide() -> bool {
@@ -795,4 +795,45 @@ mod tests {
         let measured = measure_text(s, 20.0, false);
         assert!((drawn - measured).abs() < 4.0, "drawn {drawn} measured {measured}");
     }
+}
+
+pub mod native {
+    pub use super::NativeOverlay;
+}
+
+/// Windows hosts the HTML plugin overlays in a DirectComposition window. The
+/// Linux HTML overlay is `WebviewOverlay` (webview_linux.rs), which doesn't
+/// plug into this, so this reports no target and plugin pages stay off.
+pub struct Overlay;
+
+impl Overlay {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn webview_target(&self) -> Option<((), ())> {
+        None
+    }
+
+    pub fn commit(&self) {}
+
+    pub fn place(&mut self, _rect: (i32, i32, i32, i32)) -> bool {
+        false
+    }
+
+    pub fn hide(&mut self) {}
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn set_webview_clickable(_clickable: bool) {}
+
+pub fn set_allow_draw_on_hebnix_focus(_allow: bool) {}
+
+pub fn has_render_focus() -> bool {
+    hebnix_sdk::process::is_rocket_league_focused()
 }

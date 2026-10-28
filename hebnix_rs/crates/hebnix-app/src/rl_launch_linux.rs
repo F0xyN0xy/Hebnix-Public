@@ -294,7 +294,7 @@ pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
                 .as_str()?;
             Some(PathBuf::from(install_path))
         }
-        RlLaunchMode::SteamProton => {
+        RlLaunchMode::SteamNative => {
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             for steamapps in hebnix_sdk::process::steam_library_steamapps_dirs() {
                 let manifest = steamapps.join(format!("appmanifest_{id}.acf"));
@@ -326,7 +326,7 @@ pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
             "Rocket League launch isn't set up yet - open Settings > Rocket League Launch Setup"
                 .to_string(),
         ),
-        RlLaunchMode::SteamProton | RlLaunchMode::SteamShortcutToHeroic => {
+        RlLaunchMode::SteamNative | RlLaunchMode::SteamShortcutToHeroic => {
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             launch_uri(&format!("steam://rungameid/{id}"))
         }
@@ -378,7 +378,7 @@ pub fn restart_multihome(cfg: &RlLaunchCfg, address: &str) -> Result<(), String>
             "Rocket League launch isn't set up yet - open Settings > Rocket League Launch Setup"
                 .to_string(),
         ),
-        RlLaunchMode::SteamProton => {
+        RlLaunchMode::SteamNative => {
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             launch_uri(&format!("steam://run/{id}//{raw}/"))
         }

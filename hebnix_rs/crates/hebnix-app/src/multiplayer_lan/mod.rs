@@ -71,3 +71,10 @@ pub fn cleanup_system_state() -> Result<(), String> {
     // itself stops when its handle drops
     firewall::remove_rules()
 }
+
+// Windows leftovers (NRPT rule, WinDivert driver, old service) that Linux never had
+pub fn clean_stale_nrpt_rule(_log: impl Fn(&str)) {}
+
+pub fn remove_legacy_service(_base_dir: &std::path::Path, _log: impl Fn(&str)) {}
+
+pub fn remove_windivert_files(_base_dir: &std::path::Path) {}
