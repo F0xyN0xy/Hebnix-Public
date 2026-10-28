@@ -1,7 +1,7 @@
 //! Complete menu-arena replacement. Gameplay packages are only read; menu-only
 //! copies contain the field, goals and recursively discovered streaming layers.
 use super::{
-    backup_guard,
+    backup_guard, game_path,
     upk_package::{UpkPackage, strip},
 };
 use serde::{Deserialize, Serialize};
@@ -405,7 +405,7 @@ fn apply_camera(menu: &mut UpkPackage, tweak: &CameraTweak) -> Result<(), String
 }
 
 fn menu(cooked: &Path) -> PathBuf {
-    cooked.join(MENU)
+    game_path::resolve(cooked, MENU)
 }
 
 fn state_dir(cooked: &Path) -> PathBuf {
@@ -545,7 +545,7 @@ fn layers_from(cooked: &Path, root: PathBuf, skip_missing: bool) -> Result<Vec<P
                 if !seen.insert(name.to_ascii_lowercase()) {
                     continue;
                 }
-                let path = cooked.join(format!("{name}.upk"));
+                let path = game_path::resolve(cooked, format!("{name}.upk"));
                 if skip_missing && !path.is_file() {
                     continue;
                 }
@@ -569,7 +569,11 @@ fn arena_layers(cooked: &Path, arena: &str) -> Result<Vec<PathBuf>, String> {
     if !valid_package(arena) {
         return Err(format!("Invalid arena layer: {arena}"));
     }
-    layers_from(cooked, cooked.join(format!("{arena}.upk")), false)
+    layers_from(
+        cooked,
+        game_path::resolve(cooked, format!("{arena}.upk")),
+        false,
+    )
 }
 
 #[derive(Clone)]
