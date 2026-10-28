@@ -33,6 +33,11 @@ impl ToggleHotkey {
         true
     }
 
+    /// unbind the key; the poller idles until `rebind` is called again
+    pub fn clear(&mut self) {
+        self.current_name.lock().unwrap().clear();
+    }
+
     /// start polling for the bound key; `on_press` fires on each rising edge
     pub fn listen<F>(&self, on_press: F)
     where

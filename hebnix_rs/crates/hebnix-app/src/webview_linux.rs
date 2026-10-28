@@ -494,7 +494,7 @@ pub mod host {
 
         pub fn sync_pages<T>(&mut self, _pages: &[T]) {}
 
-        pub fn deliver(&self, _slug: &str, _data: &serde_json::Value) -> Result<(), String> {
+        pub fn deliver<T>(&self, _slug: &str, _data: T) -> Result<(), String> {
             Ok(())
         }
 

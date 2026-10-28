@@ -563,7 +563,7 @@ pub fn capture_image(
 /// the platform backend: wlr-layer-shell on Wayland, an ARGB window on X11
 enum Backend {
     Wayland(wayland::WaylandOverlay),
-    X11(x11::X11NativeOverlay),
+    X11(x11::X11Overlay),
 }
 
 impl Backend {
@@ -602,7 +602,7 @@ impl Backend {
             return wayland::WaylandOverlay::new().map(Backend::Wayland);
         }
         if std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()) {
-            return x11::X11NativeOverlay::new().map(Backend::X11);
+            return x11::X11Overlay::new().map(Backend::X11);
         }
         Err("no WAYLAND_DISPLAY or DISPLAY set".to_string())
     }

@@ -282,7 +282,7 @@ fn heroic_launch(cfg: &RlLaunchCfg, multihome: Option<&str>) -> Result<(), Strin
 /// Heroic-based modes, Steam's appmanifest for SteamProton.
 pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
     match cfg.mode {
-        RlLaunchMode::Unconfigured => None,
+        RlLaunchMode::Unconfigured | RlLaunchMode::EpicDirect => None,
         RlLaunchMode::HeroicDirect | RlLaunchMode::SteamShortcutToHeroic => {
             let path =
                 dirs::home_dir()?.join(".config/heroic/legendaryConfig/legendary/installed.json");
@@ -322,7 +322,7 @@ pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
 pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
     tracing::info!("rl_launch: restart() mode={:?}", cfg.mode);
     match cfg.mode {
-        RlLaunchMode::Unconfigured => Err(
+        RlLaunchMode::Unconfigured | RlLaunchMode::EpicDirect => Err(
             "Rocket League launch isn't set up yet - open Settings > Rocket League Launch Setup"
                 .to_string(),
         ),
@@ -374,7 +374,7 @@ pub fn restart_multihome(cfg: &RlLaunchCfg, address: &str) -> Result<(), String>
     }
 
     match cfg.mode {
-        RlLaunchMode::Unconfigured => Err(
+        RlLaunchMode::Unconfigured | RlLaunchMode::EpicDirect => Err(
             "Rocket League launch isn't set up yet - open Settings > Rocket League Launch Setup"
                 .to_string(),
         ),
