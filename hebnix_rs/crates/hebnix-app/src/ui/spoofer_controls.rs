@@ -94,7 +94,12 @@ impl HebnixApp {
                         self.disable_certificate_features();
                         if self.spoofer_mgr.account_redirect_active() {
                             self.console.write("[Spoofer] The account redirect could not be removed. The certificate is retained until cleanup succeeds.");
-                        } else { match spoofer::ca::uninstall() {
+                        } else { match {
+                            #[cfg(target_os = "windows")]
+                            { spoofer::ca::uninstall() }
+                            #[cfg(target_os = "linux")]
+                            { spoofer::ca::uninstall(&crate::config::base_dir()) }
+                        } {
                             Ok(()) => self.console.write("[Spoofer] Certificate removed."),
                             Err(error) => self
                                 .console

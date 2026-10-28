@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
 use std::process::Command;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use serde::{Deserialize, Serialize};
@@ -1089,16 +1092,26 @@ fn save_state(dir: &Path, state: &State) -> Result<(), String> {
     }
     std::fs::rename(temp, path).map_err(|e| format!("Could not finish state update: {e}"))
 }
+fn rocket_league_running() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("tasklist.exe")
+            .args(["/FI", "IMAGENAME eq RocketLeague.exe", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .output();
+        output.ok().is_some_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_ascii_lowercase()
+                .contains("rocketleague.exe")
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        hebnix_sdk::process::is_rocket_league_running()
+    }
+}
 fn ensure_game_closed(action: &str) -> Result<(), String> {
-    let output = Command::new("tasklist.exe")
-        .args(["/FI", "IMAGENAME eq RocketLeague.exe", "/NH"])
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .output();
-    if output.ok().is_some_and(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .to_ascii_lowercase()
-            .contains("rocketleague.exe")
-    }) {
+    if rocket_league_running() {
         Err(format!("Close Rocket League before {action}."))
     } else {
         Ok(())

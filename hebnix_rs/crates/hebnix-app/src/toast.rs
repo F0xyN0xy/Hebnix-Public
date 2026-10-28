@@ -7,8 +7,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
+#[cfg(target_os = "windows")]
+use crate::overlay::rect as rect_styled;
+#[cfg(target_os = "linux")]
+use crate::overlay::rect_styled;
 use crate::i18n::{t, t_args};
 use crate::overlay::{self, Rgba};
 
@@ -118,14 +123,31 @@ pub struct Stamp {
 
 impl Stamp {
     pub fn now() -> Self {
-        let st = unsafe { GetLocalTime() };
-        Self {
-            year: st.wYear,
-            month: st.wMonth as u8,
-            day: st.wDay as u8,
-            hour: st.wHour as u8,
-            min: st.wMinute as u8,
-            sec: st.wSecond as u8,
+        #[cfg(target_os = "windows")]
+        {
+            let st = unsafe { GetLocalTime() };
+            Self {
+                year: st.wYear,
+                month: st.wMonth as u8,
+                day: st.wDay as u8,
+                hour: st.wHour as u8,
+                min: st.wMinute as u8,
+                sec: st.wSecond as u8,
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // local offset lookup can fail (multithreaded, unsound TZ), then fall back to UTC
+            let st = time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+            Self {
+                year: st.year().clamp(0, u16::MAX as i32) as u16,
+                month: u8::from(st.month()),
+                day: st.day(),
+                hour: st.hour(),
+                min: st.minute(),
+                sec: st.second(),
+            }
         }
     }
 
@@ -382,7 +404,7 @@ impl ToastCenter {
             cur.fit_w = inner;
         }
 
-        overlay::rect(
+        rect_styled(
             x,
             y,
             cw,
@@ -394,7 +416,7 @@ impl ToastCenter {
             9.0 * s,
         );
         let accent = col(cur.accent);
-        overlay::rect(x + 9.0 * s, y + 12.0 * s, 3.0 * s, ch - 24.0 * s, accent, accent, 0.0, true, 1.5 * s);
+        rect_styled(x + 9.0 * s, y + 12.0 * s, 3.0 * s, ch - 24.0 * s, accent, accent, 0.0, true, 1.5 * s);
         if let Some(path) = &cur.image {
             overlay::image(path, x + 24.0 * s, y + (ch - img) / 2.0, img, img, f, 6.0 * s);
         }

@@ -33,6 +33,19 @@ impl ToggleHotkey {
         true
     }
 
+    /// unbind the key; the poller idles until `rebind` is called again
+    pub fn clear(&mut self) {
+        self.current_name.lock().unwrap().clear();
+    }
+
+    /// start polling for the bound key; `on_press` fires on each rising edge
+    pub fn listen<F>(&self, on_press: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+        spawn_poller(self.shared_key(), on_press);
+    }
+
     /// shared handle for the polling thread to read the live key name from.
     pub fn shared_key(&self) -> Arc<Mutex<String>> {
         Arc::clone(&self.current_name)

@@ -1,10 +1,14 @@
 // crates/hebnix-app/src/spoofer/mod.rs
 //! name spoofer. our own CA (ca), our own mitm proxy (proxy), spoofs live in rules.
 
+#[path = "ca_linux.rs"]
 pub mod ca;
 pub mod crl;
+#[path = "dns_linux.rs"]
 pub mod dns;
+#[path = "hosts_linux.rs"]
 pub mod hosts;
+#[path = "http_linux.rs"]
 mod http;
 pub mod proxy;
 pub mod rules;
@@ -866,5 +870,20 @@ mod prefix_proxy_tests {
         assert_eq!(read_marker(&marker_path(&base)).unwrap(), vec![backup]);
         let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(prefix);
+    }
+}
+
+/// Windows relaunches itself elevated for the spoofer; Linux elevates per action
+/// (see `run_privileged`), so there is nothing to relaunch
+pub const SKIP_ELEVATE_ARG: &str = "--no-elevate";
+
+pub fn spawn_elevated_relaunch() -> bool {
+    false
+}
+
+impl SpooferManager {
+    /// the hosts redirect is applied per action on Linux, never left active
+    pub fn account_redirect_active(&self) -> bool {
+        false
     }
 }

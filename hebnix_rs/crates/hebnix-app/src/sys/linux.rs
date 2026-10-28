@@ -249,25 +249,32 @@ pub fn kill_rocket_league() -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn restart_rocket_league(
-    _game_path: &std::path::Path,
+pub fn start_rocket_league(
     launch_cfg: &crate::config::RlLaunchCfg,
-) -> Result<(), String> {
-    kill_rocket_league().map_err(|error| error.to_string())?;
+    _game_path: &std::path::Path,
+) -> std::io::Result<()> {
+    crate::rl_launch::restart(launch_cfg).map_err(std::io::Error::other)
+}
+
+pub fn restart_rocket_league(
+    launch_cfg: &crate::config::RlLaunchCfg,
+    _game_path: &std::path::Path,
+) -> std::io::Result<()> {
+    kill_rocket_league()?;
     for _ in 0..60 {
         if !hebnix_sdk::process::is_rocket_league_running() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    crate::rl_launch::restart(launch_cfg)
+    crate::rl_launch::restart(launch_cfg).map_err(std::io::Error::other)
 }
 
 /// Workshop multiplayer "restart, but leave out -multihome" (experimental
 /// option, keeps normal online play working)
 pub fn restart_rocket_league_without_multihome(
-    _game_path: &std::path::Path,
     launch_cfg: &crate::config::RlLaunchCfg,
+    _game_path: &std::path::Path,
 ) -> Result<(), String> {
     kill_rocket_league().map_err(|error| error.to_string())?;
     for _ in 0..60 {
@@ -282,9 +289,9 @@ pub fn restart_rocket_league_without_multihome(
 /// Workshop LAN "restart with -multihome=<address>" -- see rl_launch.rs for
 /// how this actually gets dispatched depending on the configured setup.
 pub fn restart_rocket_league_multihome(
+    launch_cfg: &crate::config::RlLaunchCfg,
     _game_path: &std::path::Path,
     address: &str,
-    launch_cfg: &crate::config::RlLaunchCfg,
 ) -> Result<(), String> {
     kill_rocket_league().map_err(|error| error.to_string())?;
     for _ in 0..60 {

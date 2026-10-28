@@ -15,6 +15,10 @@ use mlua::{Lua, LuaSerdeExt, SerializeOptions, Table, Value as LuaValue, Variadi
 
 use hebnix_sdk::tracker::TrackerClient;
 
+#[cfg(target_os = "windows")]
+use crate::overlay::rect as rect_styled;
+#[cfg(target_os = "linux")]
+use crate::overlay::rect_styled;
 use crate::messages::AppMsg;
 use crate::plugins::cvar::{CvarRegistry, CvarValue};
 use crate::plugins::store::PluginStore;
@@ -564,6 +568,7 @@ fn clear_asset_dir(plugin_dir: &std::path::Path, rel: &str) -> bool {
     ok
 }
 
+#[cfg(target_os = "windows")]
 fn shell_open(target: &str) -> bool {
     #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -582,6 +587,17 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         )
     };
     hinst.0 as usize > 32
+}
+
+#[cfg(target_os = "linux")]
+fn shell_open(target: &str) -> bool {
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 // Current-Ui stack
@@ -1307,15 +1323,43 @@ fn install_screen_api(lua: &Lua, hebnix: &Table) -> mlua::Result<()> {
     screen.set(
         "cursor",
         lua.create_function(|_, ()| {
-            let Some((left, top, _, _)) = hebnix_sdk::process::get_rocket_league_window_rect()
-            else {
-                return Ok((None, None));
-            };
-            let mut p = windows::Win32::Foundation::POINT::default();
-            if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) }.is_err() {
-                return Ok((None, None));
+            #[cfg(target_os = "windows")]
+            {
+                let Some((left, top, _, _)) = hebnix_sdk::process::get_rocket_league_window_rect()
+                else {
+                    return Ok((None, None));
+                };
+                let mut p = windows::Win32::Foundation::POINT::default();
+                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) }.is_err() {
+                    return Ok((None, None));
+                }
+                Ok((Some(p.x - left), Some(p.y - top)))
             }
-            Ok((Some(p.x - left), Some(p.y - top)))
+            #[cfg(target_os = "linux")]
+            {
+                // linux-port: the compositor gives the cursor (Hyprland, KDE,
+                // X11 desktops), relative to RL's window rect. That rect can be in
+                // logical units on a scaled monitor while frames are in the
+                // window's real pixels, so scale it onto the frame when they differ
+                let Some((left, top, right, bottom)) =
+                    hebnix_sdk::process::get_rocket_league_window_rect()
+                else {
+                    return Ok((None, None));
+                };
+                let Some((mut x, mut y)) = hebnix_sdk::process::cursor_in_rl_window() else {
+                    return Ok((None, None));
+                };
+                let (rect_w, rect_h) = (right - left, bottom - top);
+                if let Some(f) = frame()
+                    && rect_w > 0
+                    && rect_h > 0
+                    && (f.width as i32 != rect_w || f.height as i32 != rect_h)
+                {
+                    x = x * f.width as i32 / rect_w;
+                    y = y * f.height as i32 / rect_h;
+                }
+                Ok((Some(x), Some(y)))
+            }
         })?,
     )?;
     hebnix.set("screen", screen)?;
@@ -3603,7 +3647,7 @@ fn build_draw_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                             .and_then(|table| table.get::<f32>("border_radius").ok())
                     })
                     .unwrap_or(0.0);
-                overlay::rect(
+                rect_styled(
                     x,
                     y,
                     w,
