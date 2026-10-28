@@ -22,7 +22,6 @@ mod ball {
 mod boost_patcher {
     pub use crate::patcher::boost_patcher::*;
 }
-#[cfg(target_os = "windows")]
 mod car_patcher {
     pub use crate::patcher::car_patcher::*;
 }
@@ -31,15 +30,12 @@ mod colours {
     pub use crate::patcher::colours::*;
 }
 mod config;
-#[cfg(target_os = "windows")]
 mod cosmetic_thumbnail {
     pub use crate::patcher::cosmetic_thumbnail::*;
 }
-#[cfg(target_os = "windows")]
 mod cosmetic_upk {
     pub use crate::patcher::cosmetic_upk::*;
 }
-#[cfg(target_os = "windows")]
 mod decal_patcher {
     pub use crate::patcher::decal_patcher::*;
 }
@@ -68,7 +64,6 @@ mod monitor;
 #[cfg(target_os = "linux")]
 #[path = "monitor_linux.rs"]
 mod monitor;
-#[cfg(target_os = "windows")]
 mod multiplayer_assets;
 #[cfg(target_os = "windows")]
 #[path = "multiplayer-lan/mod.rs"]
@@ -98,7 +93,6 @@ mod recovery_tasks;
 #[cfg(target_os = "linux")]
 #[path = "recovery_tasks_linux.rs"]
 mod recovery_tasks;
-#[cfg(target_os = "windows")]
 mod runtime_assets;
 mod screen;
 #[cfg(target_os = "windows")]
@@ -117,7 +111,6 @@ mod theme;
 mod toast;
 mod tray;
 mod ui;
-#[cfg(target_os = "windows")]
 mod ui_work;
 mod update;
 mod upk_keys {
