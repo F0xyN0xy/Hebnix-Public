@@ -10,7 +10,6 @@ md-5 = "0.10"
 aes = "0.8"
 crossbeam-channel.workspace = true
 dirs = "6.0.0"
-gilrs = "0.11"
 regex = "1.12.4"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -19,13 +18,17 @@ thiserror.workspace = true
 tracing.workspace = true
 ureq = { workspace = true, features = ["json"] }
 tungstenite = "0.21"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gilrs = "0.10"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_XboxController", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gilrs = "0.11"
 nix = { version = "0.29", features = ["process", "signal"] }
 evdev = "0.13"
 libloading = "0.8"
 x11rb = { version = "0.13", features = ["randr"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_XboxController", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

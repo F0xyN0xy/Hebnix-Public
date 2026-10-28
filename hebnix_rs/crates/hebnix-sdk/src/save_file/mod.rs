@@ -20,6 +20,7 @@ pub use models::*;
 
 use std::path::{Path, PathBuf};
 
+use crate::utils::constants::{SAVE_PATH_EPIC, SAVE_PATH_STEAM};
 
 /// decrypt + parse a .save into a typed SaveData
 pub fn load(filepath: &Path, check_crc: bool) -> Result<SaveData, crypto::SaveError> {
@@ -186,9 +187,8 @@ pub fn find_save_accounts(save_data_path: Option<&Path>) -> Vec<SaveAccount> {
     accounts
 }
 
-/// find the right save data path (steam or epic): the running game's, else
-/// the one in Rocket League's Documents folder (see
-/// process::rocket_league_documents_dir) with the newest .save.
+/// find the right save data path (steam or epic). tries the running game
+/// first, else picks whichever path has the newest .save.
 pub fn detect_save_data_path() -> Option<PathBuf> {
     let docs = crate::utils::paths::documents_dir()?;
     preferred_save_data_path(
@@ -203,16 +203,30 @@ fn preferred_save_data_path(docs: &Path, preferred: Option<PathBuf>) -> Option<P
         .or_else(|| newest_save_data_path(docs))
 }
 
-/// the Steam or Epic DBE_Production folder under `docs` with the newest .save
 fn newest_save_data_path(docs: &Path) -> Option<PathBuf> {
-    let dir = crate::process::save_data_dir_in(docs, crate::process::RlPlatform::Unknown);
-    dir.is_dir().then_some(dir)
+    let mut best_path: Option<PathBuf> = None;
+    let mut best_mtime: Option<std::time::SystemTime> = None;
+
+    for rel in [SAVE_PATH_STEAM, SAVE_PATH_EPIC] {
+        let candidate = docs.join(rel);
+        if !candidate.is_dir() {
+            continue;
+        }
+        if let Some(latest) = find_save_file(Some(&candidate)) {
+            if let Ok(mtime) = latest.metadata().and_then(|m| m.modified()) {
+                if best_mtime.map(|b| mtime > b).unwrap_or(true) {
+                    best_mtime = Some(mtime);
+                    best_path = Some(candidate);
+                }
+            }
+        }
+    }
+    best_path
 }
 
 #[cfg(test)]
 mod path_tests {
     use super::*;
-    use crate::utils::constants::{SAVE_PATH_EPIC, SAVE_PATH_STEAM};
 
     #[test]
     fn latest_save_fallback_uses_rotations_and_recency_instead_of_account_names() {

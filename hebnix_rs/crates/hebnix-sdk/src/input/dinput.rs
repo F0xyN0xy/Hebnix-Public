@@ -2,18 +2,21 @@
 //! SDL_GameControllerDB), covering anything that isn't a native XInput device:
 //! PS4/PS5 pads, 8BitDo pads in dinput mode, Switch-style pads, and any other
 //! controller with an SDL community mapping.
-//!
-//! Shares the one `Gilrs` handle in `gilrs_hub` with `xinput.rs` instead of
-//! opening a second one onto the same physical devices.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use gilrs::{Gamepad, GamepadId};
+use gilrs::{Gamepad, GamepadId, GilrsBuilder};
 
-use super::gilrs_hub;
+// gilrs 0.10.10 vendors a snapshot of SDL_GameControllerDB that's missing
+// newer controllers (e.g. no "8BitDo Ultimate 2" entry, only the older
+// "Ultimate"/"Ultimate C"/"Ultimate 2C" pads), so recognised-but-outdated
+// devices fall back to gilrs' raw/positional layout instead of the real one.
+// pulled fresh from https://github.com/mdqinc/SDL_GameControllerDB
+// (zlib licensed) - update this file periodically for newly released pads.
+const GAME_CONTROLLER_DB: &str = include_str!("../../assets/gamecontrollerdb.txt");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -297,62 +300,64 @@ pub fn start_dinput_monitor() {
 }
 
 fn monitor_loop() {
+    let built = GilrsBuilder::new()
+        // use our up-to-date db instead of gilrs' bundled (older) snapshot
+        .add_included_mappings(false)
+        .add_mappings(GAME_CONTROLLER_DB)
+        .build();
+    let Ok(mut gilrs) = built else {
+        tracing::warn!("gilrs init failed, dinput controller support disabled");
+        return;
+    };
+
     let mut active: Option<GamepadId> = None;
 
     loop {
-        {
-            let mut guard = gilrs_hub::handle().lock().unwrap();
-            let Some(gilrs) = guard.as_mut() else {
-                // no working gilrs handle at all; nothing to poll, ever
-                return;
-            };
-
-            // drain pending events so gilrs' internal state is current, pick up
-            // connects/disconnects, and track raw codes for buttons gilrs can't
-            // name (paddles etc - see raw_pressed_set)
-            while let Some(event) = gilrs.next_event() {
-                match event.event {
-                    gilrs::EventType::Connected if active.is_none() => {
-                        active = Some(event.id);
-                    }
-                    gilrs::EventType::Disconnected if active == Some(event.id) => {
-                        active = None;
-                        raw_pressed_set().lock().unwrap().clear();
-                    }
-                    gilrs::EventType::ButtonPressed(gilrs::Button::Unknown, code)
-                        if active == Some(event.id) =>
-                    {
-                        raw_pressed_set().lock().unwrap().insert(code.into_u32());
-                    }
-                    gilrs::EventType::ButtonReleased(gilrs::Button::Unknown, code)
-                        if active == Some(event.id) =>
-                    {
-                        raw_pressed_set().lock().unwrap().remove(&code.into_u32());
-                    }
-                    _ => {}
+        // drain pending events so gilrs' internal state is current, pick up
+        // connects/disconnects, and track raw codes for buttons gilrs can't
+        // name (paddles etc - see raw_pressed_set)
+        while let Some(event) = gilrs.next_event() {
+            match event.event {
+                gilrs::EventType::Connected if active.is_none() => {
+                    active = Some(event.id);
                 }
-            }
-
-            // fall back to the first still-connected pad if we haven't latched
-            // onto one yet (covers pads already plugged in at startup)
-            if active.is_none() {
-                active = gilrs.gamepads().find(|(_, g)| g.is_connected()).map(|(id, _)| id);
-            }
-
-            match active.and_then(|id| gilrs.connected_gamepad(id)) {
-                Some(gamepad) => {
-                    let layout = detect_layout(gamepad.name(), gamepad.vendor_id());
-                    let ps_gen = (layout == Layout::PlayStation)
-                        .then(|| detect_ps_gen(gamepad.product_id()));
-                    set_layout(Some(layout), ps_gen);
-                    *pressed_set().lock().unwrap() = read_pressed(&gamepad);
-                }
-                None => {
+                gilrs::EventType::Disconnected if active == Some(event.id) => {
                     active = None;
-                    set_layout(None, None);
-                    pressed_set().lock().unwrap().clear();
                     raw_pressed_set().lock().unwrap().clear();
                 }
+                gilrs::EventType::ButtonPressed(gilrs::Button::Unknown, code)
+                    if active == Some(event.id) =>
+                {
+                    raw_pressed_set().lock().unwrap().insert(code.into_u32());
+                }
+                gilrs::EventType::ButtonReleased(gilrs::Button::Unknown, code)
+                    if active == Some(event.id) =>
+                {
+                    raw_pressed_set().lock().unwrap().remove(&code.into_u32());
+                }
+                _ => {}
+            }
+        }
+
+        // fall back to the first still-connected pad if we haven't latched
+        // onto one yet (covers pads already plugged in at startup)
+        if active.is_none() {
+            active = gilrs.gamepads().find(|(_, g)| g.is_connected()).map(|(id, _)| id);
+        }
+
+        match active.and_then(|id| gilrs.connected_gamepad(id)) {
+            Some(gamepad) => {
+                let layout = detect_layout(gamepad.name(), gamepad.vendor_id());
+                let ps_gen = (layout == Layout::PlayStation)
+                    .then(|| detect_ps_gen(gamepad.product_id()));
+                set_layout(Some(layout), ps_gen);
+                *pressed_set().lock().unwrap() = read_pressed(&gamepad);
+            }
+            None => {
+                active = None;
+                set_layout(None, None);
+                pressed_set().lock().unwrap().clear();
+                raw_pressed_set().lock().unwrap().clear();
             }
         }
 

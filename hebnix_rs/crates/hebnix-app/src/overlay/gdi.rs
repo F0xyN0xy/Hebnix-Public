@@ -1,4 +1,3 @@
-#[cfg(target_os = "windows")]
 //! gdi fallback overlay: the old layered color-key window (python W2SOverlay).
 //! only used when d3d11 init fails.
 //!

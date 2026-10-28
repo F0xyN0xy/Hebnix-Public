@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "windows")]
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::i18n::{t, t_args};

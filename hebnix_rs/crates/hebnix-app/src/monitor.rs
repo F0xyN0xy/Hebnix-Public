@@ -19,11 +19,9 @@ pub struct MonitorShared {
     pub api_port: u16,
     pub statsapi_path: String,
     pub rl_path: String,
-    pub rl_launch: crate::config::RlLaunchCfg,
 }
 
 pub struct Monitor {
-    #[cfg(not(feature = "lite"))]
     shared: Arc<Mutex<MonitorShared>>,
     running: Arc<AtomicBool>,
 }
@@ -50,18 +48,14 @@ impl Monitor {
                 .expect("failed to spawn monitor thread");
         }
 
-        Self {
-            #[cfg(not(feature = "lite"))]
-            shared,
-            running,
-        }
+        Self { shared, running }
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    #[cfg(not(feature = "lite"))]
+    /// the loop reads these every 2.5s, push changes or it probes the old port
     pub fn update_shared(&self, shared: MonitorShared) {
         if let Ok(mut current) = self.shared.lock() {
             *current = shared;
@@ -88,11 +82,9 @@ fn monitor_loop(
         // every 0.5s: topmost tracking
         let rl_focused = hebnix_sdk::process::is_rocket_league_focused();
         // overlay must never outlive game focus. the ui loop hides it too but
-        // can stall while the main window's hidden, so this thread is the real
-        // enforcer.
-        if !rl_focused {
-            crate::overlay::enforce_hidden();
-        }
+        // can stall while the main window's hidden, so this thread also
+        // enforces the configured focus policy.
+        crate::overlay::enforce_hidden();
         crate::winutil::note_foreground();
         let on_screen = !crate::winutil::main_window_hidden();
         let should_be_topmost =
@@ -105,32 +97,18 @@ fn monitor_loop(
 
         // every 2.5s: RL / statsapi status
         if tick % 5 == 0 {
-            let (port, statsapi_path, rl_path, rl_launch) = {
+            let (port, statsapi_path, rl_path) = {
                 let s = shared.lock().unwrap();
-                (
-                    s.api_port,
-                    s.statsapi_path.clone(),
-                    s.rl_path.clone(),
-                    s.rl_launch.clone(),
-                )
+                (s.api_port, s.statsapi_path.clone(), s.rl_path.clone())
             };
 
             // liveness by process name. the exe path goes unreadable once eac
             // locks the process, so needing it made a running game look closed.
             let rl_open = hebnix_sdk::process::is_rocket_league_running();
-            // path resolution via the live process is best-effort (only works
-            // during the brief window before eac locks the exe path down);
-            // resolve_install_root() reads it straight from the launcher's
-            // own install manifest instead, which doesn't need the live
-            // process at all and is what actually keeps rl_path pointed at
-            // wherever the game currently being played is really installed.
+            // path resolution is best-effort (works during startup before eac)
             let root_dir = if rl_open {
                 hebnix_sdk::process::find_rocket_league()
                     .map(|info| info.root_dir.to_string_lossy().to_string())
-                    .or_else(|| {
-                        crate::rl_launch::resolve_install_root(&rl_launch)
-                            .map(|p| p.to_string_lossy().to_string())
-                    })
             } else {
                 None
             };

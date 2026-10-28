@@ -31,19 +31,42 @@ mod colours {
     pub use crate::patcher::colours::*;
 }
 mod config;
+#[cfg(target_os = "windows")]
+mod cosmetic_thumbnail {
+    pub use crate::patcher::cosmetic_thumbnail::*;
+}
+#[cfg(target_os = "windows")]
+mod cosmetic_upk {
+    pub use crate::patcher::cosmetic_upk::*;
+}
+#[cfg(target_os = "windows")]
+mod decal_patcher {
+    pub use crate::patcher::decal_patcher::*;
+}
 mod deep_link;
 mod discord_link;
 mod discord_presence;
 #[cfg(target_os = "windows")]
 mod dpi_fix;
+#[cfg(target_os = "linux")]
+#[path = "dpi_fix_linux.rs"]
+mod dpi_fix;
 #[cfg(target_os = "windows")]
 mod epic_connection;
+#[cfg(target_os = "windows")]
+mod hotkey;
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
 mod hotkey;
 #[cfg(target_os = "windows")]
 mod hosts_file;
 mod i18n;
 mod item_cleanup;
 mod messages;
+#[cfg(target_os = "windows")]
+mod monitor;
+#[cfg(target_os = "linux")]
+#[path = "monitor_linux.rs"]
 mod monitor;
 #[cfg(target_os = "windows")]
 mod multiplayer_assets;
@@ -53,6 +76,10 @@ mod multiplayer_lan;
 #[cfg(target_os = "linux")]
 mod multiplayer_lan;
 mod notifications;
+#[cfg(target_os = "windows")]
+mod overlay;
+#[cfg(target_os = "linux")]
+#[path = "overlay/mod_linux.rs"]
 mod overlay;
 mod owned_inventory;
 mod veryimportantfile;
@@ -61,11 +88,19 @@ mod patch_core {
 }
 mod plugins;
 mod presets;
+#[cfg(target_os = "windows")]
+mod rl_launch;
+#[cfg(target_os = "linux")]
+#[path = "rl_launch_linux.rs"]
 mod rl_launch;
 mod recovery_tasks;
 #[cfg(target_os = "windows")]
 mod runtime_assets;
 mod screen;
+#[cfg(target_os = "windows")]
+mod spoofer;
+#[cfg(target_os = "linux")]
+#[path = "spoofer/mod_linux.rs"]
 mod spoofer;
 mod statsapi_ini;
 mod speed_patch {
@@ -84,10 +119,21 @@ mod update;
 mod upk_keys {
     pub use crate::patcher::upk_keys::*;
 }
+#[cfg(target_os = "windows")]
+mod watchdog;
+#[cfg(target_os = "linux")]
+#[path = "watchdog_linux.rs"]
 mod watchdog;
 #[cfg(target_os = "windows")]
 mod webview;
+#[cfg(target_os = "linux")]
+#[path = "webview_linux.rs"]
+mod webview;
 mod winutil;
+#[cfg(target_os = "windows")]
+mod window_state;
+#[cfg(target_os = "linux")]
+#[path = "window_state_linux.rs"]
 mod window_state;
 mod visibility;
 

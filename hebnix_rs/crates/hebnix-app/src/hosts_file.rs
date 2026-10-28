@@ -234,8 +234,6 @@ fn with_redirects(content: &str, hosts: &[&str]) -> String {
 
 fn write(path: &Path, content: &str) -> Result<(), String> {
     use std::io::Write;
-    #[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
     use std::os::windows::ffi::OsStrExt;
     // Publish a complete file instead of truncating hosts in place. A killed
     // process must not erase the user's unrelated entries halfway through.

@@ -1,4 +1,3 @@
-#[cfg(target_os = "windows")]
 //! gpu-composited click-through overlay (DirectComposition + d3d11 + direct2d).
 //!
 //! pipeline: a WS_EX_NOREDIRECTIONBITMAP layered popup (no gdi redirection

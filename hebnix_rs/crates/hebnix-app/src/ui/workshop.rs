@@ -26,6 +26,10 @@ mod banner_image;
 mod background_changer;
 mod menu_map;
 mod local_import;
+#[cfg(target_os = "windows")]
+mod steam_download;
+#[cfg(target_os = "linux")]
+#[path = "workshop/steam_download_linux.rs"]
 mod steam_download;
 use archive::ArchiveBrowser;
 use background_changer::BackgroundChangerState;

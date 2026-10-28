@@ -25,8 +25,6 @@
 //! setup (ours or the user's own Tailscale) is left alone.
 
 use std::net::{SocketAddr, TcpStream};
-#[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
@@ -149,7 +147,7 @@ pub fn remove_windivert_files(base_dir: &std::path::Path) {
 fn sc(args: &[&str]) -> Result<String, String> {
     let output = Command::new("sc.exe")
         .args(args)
-        #[cfg(target_os = "windows")].creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|error| format!("failed to run sc.exe: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

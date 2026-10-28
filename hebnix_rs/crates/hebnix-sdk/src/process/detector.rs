@@ -74,41 +74,8 @@ fn documents_dir() -> PathBuf {
     crate::utils::paths::documents_dir().unwrap_or_else(|| PathBuf::from("Documents"))
 }
 
-/// DBE_Production/ under a Documents folder: the platform's own when known,
-/// else whichever of Steam's and Epic's has the newest .save
-pub fn save_data_dir_in(docs: &Path, platform: RlPlatform) -> PathBuf {
-    match platform {
-        RlPlatform::Steam => docs.join(SAVE_PATH_STEAM),
-        RlPlatform::Epic => docs.join(SAVE_PATH_EPIC),
-        RlPlatform::Unknown => [SAVE_PATH_STEAM, SAVE_PATH_EPIC]
-            .into_iter()
-            .map(|rel| docs.join(rel))
-            .filter_map(|dir| Some((newest_save_time(&dir)?, dir)))
-            .max_by_key(|(modified, _)| *modified)
-            .map(|(_, dir)| dir)
-            .unwrap_or_else(|| docs.join(SAVE_PATH_STEAM)),
-    }
-}
-
-fn newest_save_time(dir: &Path) -> Option<std::time::SystemTime> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("save"))
-        })
-        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
-        .max()
-}
-
 /// full path to DBE_Production/ for the platform
 pub fn get_save_data_path(platform: RlPlatform) -> PathBuf {
-    if let Some(docs) = super::wine_prefix::rocket_league_documents_dir() {
-        return save_data_dir_in(&docs, platform);
-    }
     let docs = documents_dir();
     match platform {
         RlPlatform::Steam => docs.join(SAVE_PATH_STEAM),
@@ -141,26 +108,43 @@ pub fn is_rocket_league_running() -> bool {
 /// Fallible name-only enumeration for operations that require confirmed closure.
 /// An enumeration failure is unknown, never evidence that the game is closed.
 pub fn rocket_league_running_checked() -> Result<bool, String> {
-    // linux-port: walk /proc directly. RL runs under Wine/Proton, where comm
-    // is the (truncated) exe name, e.g. "RocketLeague.ex".
-    let entries =
-        std::fs::read_dir("/proc").map_err(|e| format!("could not list processes: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("could not list processes: {e}"))?;
-        let name = entry.file_name();
-        if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        // a process can exit between the listing and this read; that's not
-        // a failure, it's just not running anymore
-        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
-            continue;
-        };
-        if comm.trim().to_lowercase().contains("rocketleague") {
-            return Ok(true);
-        }
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GetLastError};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snapshot =
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            Process32FirstW(snapshot, &mut entry).map_err(|e| e.to_string())?;
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                if String::from_utf16_lossy(&entry.szExeFile[..end])
+                    .eq_ignore_ascii_case("RocketLeague.exe")
+                {
+                    return Ok(true);
+                }
+                if let Err(e) = Process32NextW(snapshot, &mut entry) {
+                    return if GetLastError() == ERROR_NO_MORE_FILES {
+                        Ok(false)
+                    } else {
+                        Err(e.to_string())
+                    };
+                }
+            }
+        })();
+        let _ = CloseHandle(snapshot);
+        result
     }
-    Ok(false)
 }
 
 /// find the running RL process + its info. None if not running or the exe
@@ -188,16 +172,7 @@ pub fn find_rocket_league() -> Option<RlProcessInfo> {
             continue;
         };
         let platform = detect_platform(&root);
-        // if the running exe lives inside a Wine/Proton prefix (it always
-        // does - RL has no native Linux client anymore), use that exact
-        // prefix's Documents dir rather than guessing between however many
-        // prefixes happen to be installed.
-        // the game is often installed outside its prefix (Heroic, a games
-        // drive), so the exe path alone can't say which prefix it runs in
-        let save_path = super::wine_prefix::documents_dir_for_exe(exe)
-            .or_else(super::wine_prefix::rocket_league_documents_dir)
-            .map(|docs| save_data_dir_in(&docs, platform))
-            .unwrap_or_else(|| get_save_data_path(platform));
+        let save_path = get_save_data_path(platform);
 
         return Some(RlProcessInfo {
             pid: pid.as_u32(),
@@ -211,24 +186,34 @@ pub fn find_rocket_league() -> Option<RlProcessInfo> {
 }
 
 /// pid of the first process whose exe name contains `name` (case-insensitive).
-/// Wine/Proton games show up under their Windows exe name, which the kernel
-/// truncates to 15 bytes, so the full exe path's file name is checked too.
 pub fn find_process(name: &str) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
     let needle = name.to_ascii_lowercase();
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
-    );
-    sys.processes()
-        .iter()
-        .find(|(_, process)| {
-            process.name().to_string_lossy().to_lowercase().contains(&needle)
-                || process
-                    .exe()
-                    .and_then(|exe| exe.file_name())
-                    .is_some_and(|exe| exe.to_string_lossy().to_lowercase().contains(&needle))
-        })
-        .map(|(pid, _)| pid.as_u32())
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut result = None;
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                let exe = String::from_utf16_lossy(&entry.szExeFile);
+                let exe = exe.trim_end_matches('\0').to_ascii_lowercase();
+                if exe.contains(&needle) {
+                    result = Some(entry.th32ProcessID);
+                    break;
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+        result
+    }
 }

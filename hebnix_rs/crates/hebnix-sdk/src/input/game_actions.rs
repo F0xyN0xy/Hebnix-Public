@@ -282,18 +282,12 @@ fn merge_bindings(
 }
 
 fn current_save_path() -> Option<PathBuf> {
-    let accounts = crate::save_file::find_save_accounts(None);
-    accounts
-        .into_iter()
-        .filter_map(|account| {
-            let modified = std::fs::metadata(&account.path)
-                .and_then(|metadata| metadata.modified())
-                .ok()?;
-            Some((modified, account.path))
-        })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, path)| path)
-        .or_else(|| crate::save_file::find_save_file(None))
+    crate::save_file::find_save_file(None).or_else(|| {
+        crate::save_file::find_save_accounts(None)
+            .into_iter()
+            .next()
+            .map(|account| account.path)
+    })
 }
 
 fn refresh_cache(cache: &mut ActionBindingCache, force: bool) -> bool {
@@ -315,32 +309,31 @@ fn refresh_cache(cache: &mut ActionBindingCache, force: bool) -> bool {
     }
 
     let mut keyboard = HashMap::new();
-    let mut gamepad_bindings = HashMap::new();
+    let mut gamepad = HashMap::new();
     let mut chat_binds = HashMap::new();
     let mut ui_scale = 1.0;
-    if let Some(path) = path.as_ref() {
-        if let Ok(save) = crate::save_file::load(path, false) {
-            if let Some(controls) = save.controls() {
-                collect_bindings(&controls.raw_bindings, false, &mut keyboard);
-                collect_chat_binds(&controls.raw_bindings, &mut chat_binds);
-            }
-            if let Some(gamepad) = save.gamepad_bindings() {
-                collect_bindings(&gamepad.raw_bindings, true, &mut gamepad_bindings);
-            }
-            // UIScale is only written once it leaves 1.0, parse_gameplay_display defaults it to 0.0
-            if let Some(display) = save.gameplay_display() {
-                if display.ui_scale > 0.0 {
-                    ui_scale = display.ui_scale;
-                }
-            }
+    if let Some(path) = path.as_ref()
+        && let Ok(save) = crate::save_file::load(path, false)
+    {
+        if let Some(controls) = save.controls() {
+            collect_bindings(&controls.raw_bindings, false, &mut keyboard);
+            collect_chat_binds(&controls.raw_bindings, &mut chat_binds);
+        }
+        if let Some(pad) = save.gamepad_bindings() {
+            collect_bindings(&pad.raw_bindings, true, &mut gamepad);
+        }
+        // UIScale is only written once it leaves 1.0, parse_gameplay_display defaults it to 0.0
+        if let Some(display) = save.gameplay_display()
+            && display.ui_scale > 0.0
+        {
+            ui_scale = display.ui_scale;
         }
     }
 
-    // stock binds live in TAInput.ini; the save only holds the changed ones
     let (ini_keyboard, ini_gamepad) = ini_default_bindings();
     let mut bindings = HashMap::new();
     merge_bindings(keyboard, ini_keyboard, &mut bindings);
-    merge_bindings(gamepad_bindings, ini_gamepad, &mut bindings);
+    merge_bindings(gamepad, ini_gamepad, &mut bindings);
 
     cache.path = path;
     cache.modified = modified;

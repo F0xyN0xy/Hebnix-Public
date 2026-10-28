@@ -1,232 +1,250 @@
-//! hotkey detection via evdev, linux only.
-//!
-//! Key names match the python `keyboard` lib ("tab", "f2", "ctrl", etc) so
-//! old configs still work.
-//!
-//! Requires read access to `/dev/input/event*`. On Arch that means the
-//! current user must be in the `input` group (`sudo usermod -aG input $USER`,
-//! then re-login) -- this module does not attempt to elevate privileges, it
-//! just returns "not pressed"/empty results if a device can't be opened.
+//! hotkey detection via GetAsyncKeyState, windows only
+//
+// key names match the python keyboard lib ("tab", "f2", "ctrl", etc) so old configs still work
 
 use std::time::{Duration, Instant};
 
-use evdev::{Device, KeyCode};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_SHIFT, VkKeyScanW,
+};
 
-// (name, evdev KeyCode) for named keys. names line up with the windows vk
-// table so existing binds keep working.
-fn named_keys() -> &'static [(&'static str, KeyCode)] {
-    &[
-        ("backspace", KeyCode::KEY_BACKSPACE),
-        ("tab", KeyCode::KEY_TAB),
-        ("enter", KeyCode::KEY_ENTER),
-        ("return", KeyCode::KEY_ENTER),
-        ("shift", KeyCode::KEY_LEFTSHIFT),
-        ("ctrl", KeyCode::KEY_LEFTCTRL),
-        ("control", KeyCode::KEY_LEFTCTRL),
-        ("alt", KeyCode::KEY_LEFTALT),
-        ("pause", KeyCode::KEY_PAUSE),
-        ("caps lock", KeyCode::KEY_CAPSLOCK),
-        ("esc", KeyCode::KEY_ESC),
-        ("escape", KeyCode::KEY_ESC),
-        ("space", KeyCode::KEY_SPACE),
-        ("page up", KeyCode::KEY_PAGEUP),
-        ("page down", KeyCode::KEY_PAGEDOWN),
-        ("end", KeyCode::KEY_END),
-        ("home", KeyCode::KEY_HOME),
-        ("left", KeyCode::KEY_LEFT),
-        ("up", KeyCode::KEY_UP),
-        ("right", KeyCode::KEY_RIGHT),
-        ("down", KeyCode::KEY_DOWN),
-        ("print screen", KeyCode::KEY_SYSRQ),
-        ("insert", KeyCode::KEY_INSERT),
-        ("delete", KeyCode::KEY_DELETE),
-        ("f1", KeyCode::KEY_F1),
-        ("f2", KeyCode::KEY_F2),
-        ("f3", KeyCode::KEY_F3),
-        ("f4", KeyCode::KEY_F4),
-        ("f5", KeyCode::KEY_F5),
-        ("f6", KeyCode::KEY_F6),
-        ("f7", KeyCode::KEY_F7),
-        ("f8", KeyCode::KEY_F8),
-        ("f9", KeyCode::KEY_F9),
-        ("f10", KeyCode::KEY_F10),
-        ("f11", KeyCode::KEY_F11),
-        ("f12", KeyCode::KEY_F12),
-        ("num lock", KeyCode::KEY_NUMLOCK),
-        ("scroll lock", KeyCode::KEY_SCROLLLOCK),
-        ("left shift", KeyCode::KEY_LEFTSHIFT),
-        ("right shift", KeyCode::KEY_RIGHTSHIFT),
-        ("left ctrl", KeyCode::KEY_LEFTCTRL),
-        ("right ctrl", KeyCode::KEY_RIGHTCTRL),
-        ("left alt", KeyCode::KEY_LEFTALT),
-        ("right alt", KeyCode::KEY_RIGHTALT),
-        ("left windows", KeyCode::KEY_LEFTMETA),
-        ("right windows", KeyCode::KEY_RIGHTMETA),
-        (";", KeyCode::KEY_SEMICOLON),
-        ("=", KeyCode::KEY_EQUAL),
-        (",", KeyCode::KEY_COMMA),
-        ("-", KeyCode::KEY_MINUS),
-        (".", KeyCode::KEY_DOT),
-        ("/", KeyCode::KEY_SLASH),
-        ("`", KeyCode::KEY_GRAVE),
-        ("[", KeyCode::KEY_LEFTBRACE),
-        ("\\", KeyCode::KEY_BACKSLASH),
-        ("]", KeyCode::KEY_RIGHTBRACE),
-        ("'", KeyCode::KEY_APOSTROPHE),
-        ("+", KeyCode::KEY_EQUAL),
-    ]
-}
+// (name, vk code) for named keys
+const NAMED_KEYS: [(&str, i32); 65] = [
+    ("mouse_left", 0x01),
+    ("mouse_right", 0x02),
+    ("mouse_middle", 0x04),
+    ("mouse_x1", 0x05),
+    ("mouse_x2", 0x06),
+    ("left mouse button", 0x01),
+    ("right mouse button", 0x02),
+    ("backspace", 0x08),
+    ("tab", 0x09),
+    ("enter", 0x0D),
+    ("return", 0x0D),
+    ("shift", 0x10),
+    ("ctrl", 0x11),
+    ("control", 0x11),
+    ("alt", 0x12),
+    ("pause", 0x13),
+    ("caps lock", 0x14),
+    ("esc", 0x1B),
+    ("escape", 0x1B),
+    ("space", 0x20),
+    ("page up", 0x21),
+    ("page down", 0x22),
+    ("end", 0x23),
+    ("home", 0x24),
+    ("left", 0x25),
+    ("up", 0x26),
+    ("right", 0x27),
+    ("down", 0x28),
+    ("print screen", 0x2C),
+    ("insert", 0x2D),
+    ("delete", 0x2E),
+    ("f1", 0x70),
+    ("f2", 0x71),
+    ("f3", 0x72),
+    ("f4", 0x73),
+    ("f5", 0x74),
+    ("f6", 0x75),
+    ("f7", 0x76),
+    ("f8", 0x77),
+    ("f9", 0x78),
+    ("f10", 0x79),
+    ("f11", 0x7A),
+    ("f12", 0x7B),
+    ("num lock", 0x90),
+    ("scroll lock", 0x91),
+    ("left shift", 0xA0),
+    ("right shift", 0xA1),
+    ("left ctrl", 0xA2),
+    ("right ctrl", 0xA3),
+    ("left alt", 0xA4),
+    ("right alt", 0xA5),
+    ("left windows", 0x5B),
+    ("right windows", 0x5C),
+    (";", 0xBA),
+    ("=", 0xBB),
+    (",", 0xBC),
+    ("-", 0xBD),
+    (".", 0xBE),
+    ("/", 0xBF),
+    ("`", 0xC0),
+    ("[", 0xDB),
+    ("\\", 0xDC),
+    ("]", 0xDD),
+    ("'", 0xDE),
+    ("+", 0xBB),
+];
 
-fn letter_digit_code(c: char) -> Option<KeyCode> {
-    Some(match c.to_ascii_lowercase() {
-        'a' => KeyCode::KEY_A,
-        'b' => KeyCode::KEY_B,
-        'c' => KeyCode::KEY_C,
-        'd' => KeyCode::KEY_D,
-        'e' => KeyCode::KEY_E,
-        'f' => KeyCode::KEY_F,
-        'g' => KeyCode::KEY_G,
-        'h' => KeyCode::KEY_H,
-        'i' => KeyCode::KEY_I,
-        'j' => KeyCode::KEY_J,
-        'k' => KeyCode::KEY_K,
-        'l' => KeyCode::KEY_L,
-        'm' => KeyCode::KEY_M,
-        'n' => KeyCode::KEY_N,
-        'o' => KeyCode::KEY_O,
-        'p' => KeyCode::KEY_P,
-        'q' => KeyCode::KEY_Q,
-        'r' => KeyCode::KEY_R,
-        's' => KeyCode::KEY_S,
-        't' => KeyCode::KEY_T,
-        'u' => KeyCode::KEY_U,
-        'v' => KeyCode::KEY_V,
-        'w' => KeyCode::KEY_W,
-        'x' => KeyCode::KEY_X,
-        'y' => KeyCode::KEY_Y,
-        'z' => KeyCode::KEY_Z,
-        '0' => KeyCode::KEY_0,
-        '1' => KeyCode::KEY_1,
-        '2' => KeyCode::KEY_2,
-        '3' => KeyCode::KEY_3,
-        '4' => KeyCode::KEY_4,
-        '5' => KeyCode::KEY_5,
-        '6' => KeyCode::KEY_6,
-        '7' => KeyCode::KEY_7,
-        '8' => KeyCode::KEY_8,
-        '9' => KeyCode::KEY_9,
-        _ => return None,
-    })
-}
-
-/// key name to evdev KeyCode
-pub fn name_to_code(key: &str) -> Option<KeyCode> {
+/// key name to windows vk code
+pub fn name_to_vk(key: &str) -> Option<i32> {
     let lower = key.trim().to_lowercase();
-    if let Some((_, code)) = named_keys().iter().find(|(n, _)| *n == lower) {
-        return Some(*code);
+    if let Some((_, vk)) = NAMED_KEYS.iter().find(|(n, _)| *n == lower) {
+        return Some(*vk);
     }
     let mut chars = lower.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
-        return letter_digit_code(c);
+        if c.is_ascii_alphanumeric() {
+            return Some(c.to_ascii_uppercase() as i32);
+        }
     }
     None
 }
 
-/// evdev KeyCode back to key name, used by hotkey capture
-pub fn code_to_name(code: KeyCode) -> Option<String> {
-    for c in 'a'..='z' {
-        if letter_digit_code(c) == Some(code) {
-            return Some(c.to_string());
-        }
+/// vk code back to key name, used by hotkey capture
+pub fn vk_to_name(vk: i32) -> Option<String> {
+    // prefer plain letters/digits
+    if (0x30..=0x39).contains(&vk) || (0x41..=0x5A).contains(&vk) {
+        return Some((vk as u8 as char).to_ascii_lowercase().to_string());
     }
-    for c in '0'..='9' {
-        if letter_digit_code(c) == Some(code) {
-            return Some(c.to_string());
-        }
-    }
-    named_keys()
+    NAMED_KEYS
         .iter()
-        .find(|(_, cc)| *cc == code)
+        .find(|(_, code)| *code == vk)
         .map(|(n, _)| n.to_string())
 }
 
-/// all keyboard-capable evdev devices (has EV_KEY + looks like a keyboard,
-/// not a mouse/joystick-only device).
-///
-/// `evdev::enumerate()` walks and opens every `/dev/input/event*` node,
-/// which in practice takes several hundred ms (confirmed live: a poller
-/// calling this every 35ms was actually only completing a cycle every
-/// ~400-450ms, and was a measurable source of app-wide sluggishness, plus
-/// plugin key-bind polls competing for the same enumeration). Cache the
-/// opened `Device` handles and reuse them -- `get_key_state()` on an
-/// already-open fd is a cheap ioctl. Re-enumerate periodically to pick up
-/// hot-plugged keyboards.
-fn with_keyboard_devices<T>(f: impl FnOnce(&mut Vec<Device>) -> T) -> T {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-
-    static CACHE: OnceLock<Mutex<(Instant, Vec<Device>)>> = OnceLock::new();
-    let cache =
-        CACHE.get_or_init(|| Mutex::new((Instant::now() - Duration::from_secs(60), Vec::new())));
-    let mut guard = cache.lock().unwrap();
-    if guard.1.is_empty() || guard.0.elapsed() > Duration::from_secs(10) {
-        let mut fresh = Vec::new();
-        for (_path, dev) in evdev::enumerate() {
-            if dev
-                .supported_keys()
-                .map(|keys| keys.contains(KeyCode::KEY_ENTER) && keys.contains(KeyCode::KEY_A))
-                .unwrap_or(false)
-            {
-                fresh.push(dev);
-            }
-        }
-        guard.1 = fresh;
-        guard.0 = Instant::now();
-    }
-    f(&mut guard.1)
-}
-
-/// true if key is held down right now, across all keyboard devices.
+/// true if key is held down right now (system-wide)
 pub fn is_key_pressed(key: &str) -> bool {
-    let Some(code) = name_to_code(key) else {
+    let Some(vk) = name_to_vk(key) else {
         return false;
     };
-    with_keyboard_devices(|devs| {
-        for dev in devs {
-            if let Ok(state) = dev.get_key_state() {
-                if state.contains(code) {
-                    return true;
-                }
-            }
-        }
-        false
-    })
+    unsafe { (GetAsyncKeyState(vk) as u16) & 0x8000 != 0 }
+}
+
+// vk codes worth scanning during capture
+fn capture_vks() -> Vec<i32> {
+    let mut vks: Vec<i32> = Vec::new();
+    vks.extend(0x30..=0x39); // digits
+    vks.extend(0x41..=0x5A); // letters
+    vks.extend(NAMED_KEYS.iter().map(|(_, vk)| *vk));
+    vks.sort_unstable();
+    vks.dedup();
+    vks
 }
 
 /// single non-blocking scan, name of whatever key is held or None.
+/// no wait-for-release like detect_hotkey, so a key already held gets reported.
+/// detect_any_hotkey needs that.
 pub fn scan_pressed_key() -> Option<String> {
-    with_keyboard_devices(|devs| {
-        for dev in devs {
-            if let Ok(state) = dev.get_key_state() {
-                for code in state.iter() {
-                    if let Some(name) = code_to_name(code) {
-                        return Some(name);
-                    }
-                }
+    let vks = capture_vks();
+    for vk in vks {
+        if unsafe { (GetAsyncKeyState(vk) as u16) & 0x8000 != 0 } {
+            if let Some(name) = vk_to_name(vk) {
+                return Some(name);
             }
         }
-        None
-    })
+    }
+    None
 }
 
-/// blocks until a key is pressed, returns its name. None if timeout hits first.
+// --- synthetic input (SendInput) ---
+//
+// used for things like quick-chat automation: tapping the chat-open key and
+// typing the message. gated by callers (not here) to whatever policy applies,
+// e.g. hebnix's "not while a match is in progress" rule for raw input.
+
+fn send_one(input: INPUT) {
+    unsafe {
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn vk_input(vk: i32, key_up: bool) -> INPUT {
+    let mut flags = KEYBD_EVENT_FLAGS(0);
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk as u16),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+const TAP_GAP: Duration = Duration::from_millis(1);
+
+/// press+release a vk code
+pub fn tap_vk(vk: i32) {
+    send_one(vk_input(vk, false));
+    std::thread::sleep(TAP_GAP);
+    send_one(vk_input(vk, true));
+    std::thread::sleep(TAP_GAP);
+}
+
+/// press+release a named key ("enter", "t", "f1", ...). false if the name
+/// isn't recognized.
+pub fn tap_key(name: &str) -> bool {
+    match name_to_vk(name) {
+        Some(vk) => {
+            tap_vk(vk);
+            true
+        }
+        None => false,
+    }
+}
+
+/// type text by tapping real vk codes (shift held for caps/punctuation as
+/// needed), mapped per the active keyboard layout via VkKeyScanW.
+///
+/// deliberately not KEYEVENTF_UNICODE: that path has no real vk/scan code
+/// attached, so games that read keyboard via raw input (most UE titles,
+/// including RL) never see it — the chat box opens (a real vk tap) and
+/// enter sends (also a real vk tap), but nothing typed in between shows up.
+/// tapping real keys goes through the same path a physical keypress would.
+pub fn type_text(text: &str) {
+    let _ = type_text_while(text, || true);
+}
+
+/// type text while the supplied guard remains true.
+pub fn type_text_while<F>(text: &str, should_continue: F) -> bool
+where
+    F: Fn() -> bool,
+{
+    for unit in text.encode_utf16() {
+        if !should_continue() {
+            return false;
+        }
+        let scan = unsafe { VkKeyScanW(unit) };
+        if scan == -1 {
+            continue; // unmappable on the current layout, skip
+        }
+        let vk = (scan & 0xFF) as i32;
+        let need_shift = (scan >> 8) & 0x1 != 0;
+
+        if need_shift {
+            send_one(vk_input(VK_SHIFT.0 as i32, false));
+            std::thread::sleep(TAP_GAP);
+        }
+        tap_vk(vk);
+        if need_shift {
+            send_one(vk_input(VK_SHIFT.0 as i32, true));
+            std::thread::sleep(TAP_GAP);
+        }
+    }
+    true
+}
+
+/// blocks until a key is pressed, returns its name.
+/// None if timeout hits first.
 pub fn detect_hotkey(timeout: Option<Duration>) -> Option<String> {
+    let vks = capture_vks();
     let start = Instant::now();
 
-    // wait for everything to release first so the click that opened capture
-    // doesn't count
+    // wait for everything to release first so the click that opened capture doesn't count
     loop {
-        if scan_pressed_key().is_none() {
+        let any_down = vks
+            .iter()
+            .any(|vk| unsafe { (GetAsyncKeyState(*vk) as u16) & 0x8000 != 0 });
+        if !any_down {
             break;
         }
         if let Some(t) = timeout {
@@ -238,8 +256,12 @@ pub fn detect_hotkey(timeout: Option<Duration>) -> Option<String> {
     }
 
     loop {
-        if let Some(name) = scan_pressed_key() {
-            return Some(name);
+        for vk in &vks {
+            if unsafe { (GetAsyncKeyState(*vk) as u16) & 0x8000 != 0 } {
+                if let Some(name) = vk_to_name(*vk) {
+                    return Some(name);
+                }
+            }
         }
         if let Some(t) = timeout {
             if start.elapsed() > t {
@@ -248,174 +270,4 @@ pub fn detect_hotkey(timeout: Option<Duration>) -> Option<String> {
         }
         std::thread::sleep(Duration::from_millis(15));
     }
-}
-
-// --- synthetic input (uinput virtual keyboard) ---
-//
-// used for things like quick-chat automation: tapping the chat-open key and
-// typing the message. gated by callers (not here) to whatever policy
-// applies, e.g. hebnix's "not while a match is in progress" rule for raw
-// input. Requires rw access to /dev/uinput (the `input` group on most
-// distros, same requirement as reading /dev/input/event* above).
-
-use evdev::uinput::VirtualDevice;
-use evdev::{AttributeSet, KeyEvent};
-
-fn all_known_codes() -> AttributeSet<KeyCode> {
-    let mut keys = AttributeSet::<KeyCode>::new();
-    for &(_, code) in named_keys() {
-        keys.insert(code);
-    }
-    for c in ('a'..='z').chain('0'..='9') {
-        if let Some(code) = letter_digit_code(c) {
-            keys.insert(code);
-        }
-    }
-    keys
-}
-
-fn virtual_keyboard() -> Option<&'static std::sync::Mutex<VirtualDevice>> {
-    static DEVICE: std::sync::OnceLock<Option<std::sync::Mutex<VirtualDevice>>> =
-        std::sync::OnceLock::new();
-    DEVICE
-        .get_or_init(|| {
-            match VirtualDevice::builder()
-                .and_then(|b| b.name("Hebnix Virtual Keyboard").with_keys(&all_known_codes()))
-                .and_then(|b| b.build())
-            {
-                Ok(dev) => Some(std::sync::Mutex::new(dev)),
-                Err(e) => {
-                    tracing::warn!(
-                        "synthetic input unavailable, couldn't create uinput virtual keyboard \
-                         (need rw on /dev/uinput, usually the 'input' group): {e}"
-                    );
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
-
-const TAP_GAP: Duration = Duration::from_millis(1);
-
-/// press+release an evdev key code
-fn tap_code(dev: &mut VirtualDevice, code: KeyCode) {
-    let _ = dev.emit(&[*KeyEvent::new(code, 1)]);
-    std::thread::sleep(TAP_GAP);
-    let _ = dev.emit(&[*KeyEvent::new(code, 0)]);
-    std::thread::sleep(TAP_GAP);
-}
-
-/// press+release a named key ("enter", "t", "f1", ...). false if the name
-/// isn't recognized or the virtual device couldn't be created.
-pub fn tap_key(name: &str) -> bool {
-    let Some(code) = name_to_code(name) else {
-        return false;
-    };
-    let Some(mutex) = virtual_keyboard() else {
-        return false;
-    };
-    let mut dev = mutex.lock().unwrap();
-    tap_code(&mut dev, code);
-    true
-}
-
-/// ascii char to (KeyCode, needs_shift). None for anything not on a
-/// standard US layout key (good enough for chat text).
-fn char_to_code(c: char) -> Option<(KeyCode, bool)> {
-    if c.is_ascii_alphabetic() {
-        return letter_digit_code(c.to_ascii_lowercase())
-            .map(|code| (code, c.is_ascii_uppercase()));
-    }
-    if c.is_ascii_digit() {
-        return letter_digit_code(c).map(|code| (code, false));
-    }
-    let (code, shift) = match c {
-        ' ' => (KeyCode::KEY_SPACE, false),
-        '\'' => (KeyCode::KEY_APOSTROPHE, false),
-        '"' => (KeyCode::KEY_APOSTROPHE, true),
-        ',' => (KeyCode::KEY_COMMA, false),
-        '<' => (KeyCode::KEY_COMMA, true),
-        '.' => (KeyCode::KEY_DOT, false),
-        '>' => (KeyCode::KEY_DOT, true),
-        '/' => (KeyCode::KEY_SLASH, false),
-        '?' => (KeyCode::KEY_SLASH, true),
-        ';' => (KeyCode::KEY_SEMICOLON, false),
-        ':' => (KeyCode::KEY_SEMICOLON, true),
-        '-' => (KeyCode::KEY_MINUS, false),
-        '_' => (KeyCode::KEY_MINUS, true),
-        '=' => (KeyCode::KEY_EQUAL, false),
-        '+' => (KeyCode::KEY_EQUAL, true),
-        '[' => (KeyCode::KEY_LEFTBRACE, false),
-        '{' => (KeyCode::KEY_LEFTBRACE, true),
-        ']' => (KeyCode::KEY_RIGHTBRACE, false),
-        '}' => (KeyCode::KEY_RIGHTBRACE, true),
-        '\\' => (KeyCode::KEY_BACKSLASH, false),
-        '|' => (KeyCode::KEY_BACKSLASH, true),
-        '`' => (KeyCode::KEY_GRAVE, false),
-        '~' => (KeyCode::KEY_GRAVE, true),
-        '1' => (KeyCode::KEY_1, false),
-        '!' => (KeyCode::KEY_1, true),
-        '2' => (KeyCode::KEY_2, false),
-        '@' => (KeyCode::KEY_2, true),
-        '3' => (KeyCode::KEY_3, false),
-        '#' => (KeyCode::KEY_3, true),
-        '4' => (KeyCode::KEY_4, false),
-        '$' => (KeyCode::KEY_4, true),
-        '5' => (KeyCode::KEY_5, false),
-        '%' => (KeyCode::KEY_5, true),
-        '6' => (KeyCode::KEY_6, false),
-        '^' => (KeyCode::KEY_6, true),
-        '7' => (KeyCode::KEY_7, false),
-        '&' => (KeyCode::KEY_7, true),
-        '8' => (KeyCode::KEY_8, false),
-        '*' => (KeyCode::KEY_8, true),
-        '9' => (KeyCode::KEY_9, false),
-        '(' => (KeyCode::KEY_9, true),
-        '0' => (KeyCode::KEY_0, false),
-        ')' => (KeyCode::KEY_0, true),
-        _ => return None,
-    };
-    Some((code, shift))
-}
-
-/// type text by tapping real key codes through the virtual keyboard (shift
-/// held for caps/punctuation as needed), US layout only. Unmappable
-/// characters (anything outside ascii) are skipped.
-///
-/// deliberately real key events, not some higher-level "insert text" API:
-/// games that read keyboard via raw input (most UE titles, including RL)
-/// only see real key events, same as this app's own bind-capture reading
-/// real key events rather than IME/text composition.
-pub fn type_text(text: &str) {
-    let _ = type_text_while(text, || true);
-}
-
-/// type text while the supplied guard remains true.
-pub fn type_text_while<F>(text: &str, should_continue: F) -> bool
-where
-    F: Fn() -> bool,
-{
-    let Some(mutex) = virtual_keyboard() else {
-        return false;
-    };
-    let mut dev = mutex.lock().unwrap();
-    for c in text.chars() {
-        if !should_continue() {
-            return false;
-        }
-        let Some((code, need_shift)) = char_to_code(c) else {
-            continue;
-        };
-        if need_shift {
-            let _ = dev.emit(&[*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 1)]);
-            std::thread::sleep(TAP_GAP);
-        }
-        tap_code(&mut dev, code);
-        if need_shift {
-            let _ = dev.emit(&[*KeyEvent::new(KeyCode::KEY_LEFTSHIFT, 0)]);
-            std::thread::sleep(TAP_GAP);
-        }
-    }
-    true
 }

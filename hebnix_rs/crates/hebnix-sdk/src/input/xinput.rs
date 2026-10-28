@@ -1,14 +1,8 @@
-//! xbox/generic controller state, backed by `gilrs` (evdev under the hood).
-//!
-//! Keeps the same XINPUT_* button masks + XInputState shape as the windows
-//! version so `bindings.rs` doesn't need to change: gilrs buttons are mapped
-//! onto the xinput bitmask on the fly.
+//! xinput (xbox controller) state.
 
-use gilrs::{Axis, Button};
+use windows::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
 
-use super::gilrs_hub;
-
-// Button masks (same values as the windows XINPUT_GAMEPAD_* constants)
+// Button masks
 
 pub const XINPUT_DPAD_UP: u16 = 0x0001;
 pub const XINPUT_DPAD_DOWN: u16 = 0x0002;
@@ -47,7 +41,7 @@ pub const XINPUT_BUTTON_DISPLAY: [(u16, &str); 14] = [
     (XINPUT_Y, "Y"),
 ];
 
-/// typed wrapper around the raw xinput-shaped state
+/// typed wrapper around the raw xinput state
 #[derive(Debug, Clone, Copy, Default)]
 pub struct XInputState {
     pub packet_number: u32,
@@ -66,58 +60,22 @@ impl XInputState {
     }
 }
 
-const GILRS_BUTTONS: [(Button, u16); 14] = [
-    (Button::DPadUp, XINPUT_DPAD_UP),
-    (Button::DPadDown, XINPUT_DPAD_DOWN),
-    (Button::DPadLeft, XINPUT_DPAD_LEFT),
-    (Button::DPadRight, XINPUT_DPAD_RIGHT),
-    (Button::Start, XINPUT_START),
-    (Button::Select, XINPUT_SELECT),
-    (Button::LeftThumb, XINPUT_LS),
-    (Button::RightThumb, XINPUT_RS),
-    (Button::LeftTrigger, XINPUT_LB),
-    (Button::RightTrigger, XINPUT_RB),
-    (Button::South, XINPUT_A),
-    (Button::East, XINPUT_B),
-    (Button::West, XINPUT_X),
-    (Button::North, XINPUT_Y),
-];
-
-fn axis_i16(v: f32) -> i16 {
-    (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-}
-
-fn trigger_u8(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * u8::MAX as f32) as u8
-}
-
-/// xinput-shaped state for controller user_index (0-3, by connection order),
-/// None if not connected.
+/// xinput state for controller user_index (0-3), None if not connected
 pub fn get_xinput_state(user_index: u32) -> Option<XInputState> {
-    let mut guard = gilrs_hub::handle().lock().unwrap();
-    let gilrs = guard.as_mut()?;
-    // drain pending events so is_pressed()/value() reflect the latest state
-    while gilrs.next_event().is_some() {}
-
-    let (_id, gamepad) = gilrs
-        .gamepads()
-        .nth(user_index as usize)?;
-
-    let mut buttons = 0u16;
-    for (btn, mask) in GILRS_BUTTONS {
-        if gamepad.is_pressed(btn) {
-            buttons |= mask;
-        }
+    let mut state = XINPUT_STATE::default();
+    let result = unsafe { XInputGetState(user_index, &mut state) };
+    if result != 0 {
+        return None;
     }
-
+    let g = state.Gamepad;
     Some(XInputState {
-        packet_number: 0,
-        buttons,
-        left_trigger: trigger_u8(gamepad.value(Axis::LeftZ)),
-        right_trigger: trigger_u8(gamepad.value(Axis::RightZ)),
-        thumb_lx: axis_i16(gamepad.value(Axis::LeftStickX)),
-        thumb_ly: axis_i16(gamepad.value(Axis::LeftStickY)),
-        thumb_rx: axis_i16(gamepad.value(Axis::RightStickX)),
-        thumb_ry: axis_i16(gamepad.value(Axis::RightStickY)),
+        packet_number: state.dwPacketNumber,
+        buttons: g.wButtons.0,
+        left_trigger: g.bLeftTrigger,
+        right_trigger: g.bRightTrigger,
+        thumb_lx: g.sThumbLX,
+        thumb_ly: g.sThumbLY,
+        thumb_rx: g.sThumbRX,
+        thumb_ry: g.sThumbRY,
     })
 }

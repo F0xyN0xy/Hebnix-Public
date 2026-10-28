@@ -275,11 +275,9 @@ fn spawn_log_reader(stderr: impl Read + Send + 'static) {
 
 #[cfg(windows)]
 fn hide_console_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+    use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command#[cfg(target_os = "windows")].creation_flags(CREATE_NO_WINDOW);
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]

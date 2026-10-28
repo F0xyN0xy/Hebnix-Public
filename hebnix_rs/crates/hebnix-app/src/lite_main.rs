@@ -1,25 +1,39 @@
-// NOTE(linux-port): `lite_app.rs` was not part of this port pass (it wasn't
-// present anywhere in hebnix-linux and porting the full lite UI was out of
-// scope). This file wires up everything else the `hebnix-lite` binary needs
-// (mirroring main.rs) but will not compile until `lite_app::LiteApp` exists.
-// Build it with `cargo check -p hebnix-app --bin hebnix-lite --features lite`
-// once that module is written.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod config;
+mod deep_link;
+mod discord_link;
+mod discord_presence;
 mod dpi_fix;
+mod epic_connection;
 mod hotkey;
+mod i18n;
 mod lite_app;
 #[path = "lite_messages.rs"]
 mod messages;
 mod monitor;
+mod notifications;
 mod overlay;
 mod plugins;
+mod runtime_assets;
+mod recovery_tasks;
 mod statsapi_ini;
 mod theme;
+mod toast;
+mod tray;
+mod update;
+mod ui_work;
 mod ui {
     pub mod console;
 }
+mod webview {
+    pub mod host;
+    pub mod runtime;
+}
 #[path = "lite_winutil.rs"]
 mod winutil;
+mod window_state;
+mod visibility;
 
 use lite_app::{DEFAULT_HEIGHT, DEFAULT_WIDTH, LiteApp, MIN_HEIGHT, MIN_WIDTH};
 
@@ -33,6 +47,35 @@ fn load_window_icon(base_dir: &std::path::Path) -> Option<eframe::egui::IconData
         width,
         height,
     })
+}
+
+/// On panic dump msg + backtrace to AppData's crash.txt, then fall
+/// through to the default hook.
+fn setup_panic_hook(base_dir: &std::path::Path) {
+    let crash_path = base_dir.join("crash.txt");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let thread = std::thread::current();
+        let text = format!(
+            "=== PANIC (unix time {ts}, thread {:?}) ===\n{info}\n\nbacktrace:\n{backtrace}\n\n",
+            thread.name().unwrap_or("<unnamed>")
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&crash_path)
+        {
+            use std::io::Write;
+            let _ = file.write_all(text.as_bytes());
+        }
+        tracing::error!("PANIC: {info}");
+        default_hook(info);
+    }));
 }
 
 fn setup_logging(base_dir: &std::path::Path) {
@@ -54,14 +97,55 @@ fn setup_logging(base_dir: &std::path::Path) {
     }
 }
 
+fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::wgpu;
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+        // `Auto` may pick up an unrelated dxcompiler.dll from PATH without the
+        // matching dxil.dll, making wgpu's first internal shader fail and lose
+        // the device. FXC is provided by Windows and needs no bundled DLLs.
+        setup
+            .instance_descriptor
+            .backend_options
+            .dx12
+            .shader_compiler = wgpu::Dx12Compiler::Fxc;
+        setup
+            .instance_descriptor
+            .backend_options
+            .dx12
+            .presentation_system = if window_state::safe_rendering() {
+                wgpu::Dx12SwapchainKind::DxgiFromHwnd
+            } else {
+                wgpu::Dx12SwapchainKind::DxgiFromVisual
+            };
+    }
+    options
+}
+
 fn main() -> eframe::Result {
-    let base_dir = crate::config::base_dir();
+    let base_dir = config::base_dir();
     setup_logging(&base_dir);
-    let Some(_lock) = winutil::acquire_single_instance() else {
+    tracing::info!(
+        safe_rendering = window_state::safe_rendering(),
+        "main window rendering mode"
+    );
+    deep_link::register_and_queue_from_args(&base_dir);
+    if let Err(error) = runtime_assets::ensure_present(&base_dir) {
+        tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
+    }
+    setup_panic_hook(&base_dir);
+    let Some(_mutex) = winutil::acquire_single_instance() else {
         winutil::focus_existing_instance();
         return Ok(());
     };
-    let config = crate::config::Config::load(&base_dir);
+    if let Err(error) = recovery_tasks::cleanup_websocket_once(&base_dir) {
+        tracing::warn!("WebSocket proxy cleanup: {error}");
+    }
+    // after the instance guard, so only one copy prompts
+    webview::runtime::ensure_present();
+    let config = config::Config::load(&base_dir);
+    i18n::init(&config.settings.language, Some(base_dir.join("locales")));
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Hebnix Lite")
         .with_inner_size([
@@ -69,7 +153,8 @@ fn main() -> eframe::Result {
             (config.window.height as f32).max(DEFAULT_HEIGHT),
         ])
         .with_min_inner_size([MIN_WIDTH, MIN_HEIGHT])
-        .with_transparent(true);
+        .with_transparent(!window_state::safe_rendering())
+        .with_visible(!config.settings.start_in_tray || window_state::safe_rendering());
     if let Some(icon) = load_window_icon(&base_dir) {
         viewport = viewport.with_icon(icon);
     }
@@ -77,6 +162,7 @@ fn main() -> eframe::Result {
         "Hebnix Lite",
         eframe::NativeOptions {
             viewport,
+            wgpu_options: dcomp_wgpu_options(),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(LiteApp::new(cc)))),

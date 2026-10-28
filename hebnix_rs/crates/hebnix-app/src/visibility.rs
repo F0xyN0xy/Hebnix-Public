@@ -4,7 +4,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{Context, ViewportId};
-#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetLayeredWindowAttributes, GetWindowLongW, IsIconic, IsWindowVisible,
     LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,

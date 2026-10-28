@@ -557,6 +557,15 @@ fn colour_row(ui: &mut egui::Ui, label: &str, colour: &mut [u8; 3]) {
     });
 }
 
+pub fn needs_admin(cooked_pc: &Path) -> bool {
+    matches!(
+        fs::OpenOptions::new().write(true).open(cooked_pc.join("TAGame.upk"))
+            .and_then(|_| fs::OpenOptions::new().write(true)
+                .open(cooked_pc.join("GameInfo_HeatseekerTerritory_SF.upk"))),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied
+    )
+}
+
 fn save_state(backups_dir: &Path, settings: &ColourSettings) -> Result<(), String> {
     fs::create_dir_all(backups_dir)
         .map_err(|error| format!("Could not create the state directory: {error}"))?;
@@ -627,7 +636,7 @@ fn restore_boost_texture_colours(cooked_pc: &Path, backups_dir: &Path) -> Result
     }
     let manifest = load_boost_texture_manifest(backups_dir)?;
     for saved in &manifest.regions {
-        let tfc_path = crate::patcher::game_path::resolve(&cooked_pc, &saved.tfc);
+        let tfc_path = cooked_pc.join(&saved.tfc);
         let file_size = fs::metadata(&tfc_path)
             .map_err(|error| format!("Could not inspect {}: {error}", tfc_path.display()))?
             .len();
@@ -661,7 +670,7 @@ fn restore_arena_boost_colours(cooked_pc: &Path, backups_dir: &Path) -> Result<(
     }
     let manifest = load_boost_manifest(backups_dir)?;
     for saved in &manifest.packages {
-        let live = crate::patcher::game_path::resolve(&cooked_pc, &saved.file);
+        let live = cooked_pc.join(&saved.file);
         let raw = fs::read(&live).map_err(|error| {
             format!(
                 "Could not read {} while restoring boost-pad colours: {error}",
@@ -709,7 +718,7 @@ fn apply(cooked_pc: &Path, backups_dir: &Path, settings: &ColourSettings) -> Res
         "colours-build.sha256",
         |name| name == BACKUP_NAME,
     )?;
-    let live = crate::patcher::game_path::resolve(&cooked_pc, "TAGame.upk");
+    let live = cooked_pc.join("TAGame.upk");
     if !live.is_file() {
         return Err(format!(
             "TAGame.upk was not found in {}",
@@ -777,7 +786,7 @@ fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     crate::patcher::backup_guard::check(cooked_pc, backups_dir, "colours-build.sha256", |name| {
         name == BACKUP_NAME
     })?;
-    let live = crate::patcher::game_path::resolve(&cooked_pc, "TAGame.upk");
+    let live = cooked_pc.join("TAGame.upk");
     let backup = backups_dir.join(BACKUP_NAME);
     if !backup.is_file() {
         return Err(format!(
