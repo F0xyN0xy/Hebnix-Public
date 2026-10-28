@@ -1,10 +1,13 @@
 // crates/hebnix-app/src/spoofer/mod.rs
 //! name spoofer. our own CA (ca), our own mitm proxy (proxy), spoofs live in rules.
 
+#[path = "ca_linux.rs"]
 pub mod ca;
 pub mod crl;
 pub mod dns;
+#[path = "hosts_linux.rs"]
 pub mod hosts;
+#[path = "http_linux.rs"]
 mod http;
 pub mod proxy;
 pub mod rules;

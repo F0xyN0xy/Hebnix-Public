@@ -30,6 +30,7 @@ pub use models::{
 };
 pub use tailcat_sidecar::{PeerLink, TailcatSidecarHandle, redact};
 pub use caps::raise_net_admin_ambient;
+pub use firewall::ensure_sidecar_rule;
 
 mod directory_auth {
     include!(concat!(env!("OUT_DIR"), "/directory_key.rs"));

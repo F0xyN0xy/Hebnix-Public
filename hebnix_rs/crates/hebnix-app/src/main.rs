@@ -93,6 +93,10 @@ mod rl_launch;
 #[cfg(target_os = "linux")]
 #[path = "rl_launch_linux.rs"]
 mod rl_launch;
+#[cfg(target_os = "windows")]
+mod recovery_tasks;
+#[cfg(target_os = "linux")]
+#[path = "recovery_tasks_linux.rs"]
 mod recovery_tasks;
 #[cfg(target_os = "windows")]
 mod runtime_assets;
@@ -135,6 +139,10 @@ mod window_state;
 #[cfg(target_os = "linux")]
 #[path = "window_state_linux.rs"]
 mod window_state;
+#[cfg(target_os = "windows")]
+mod visibility;
+#[cfg(target_os = "linux")]
+#[path = "visibility_linux.rs"]
 mod visibility;
 
 use app::HebnixApp;

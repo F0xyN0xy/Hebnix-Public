@@ -8,6 +8,10 @@
 //! the capture is lazy: it starts the first time something asks for a pixel,
 //! and stops after IDLE_STOP with no requests.
 
+#[cfg(target_os = "windows")]
+mod capture;
+#[cfg(target_os = "linux")]
+#[path = "capture_linux.rs"]
 mod capture;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

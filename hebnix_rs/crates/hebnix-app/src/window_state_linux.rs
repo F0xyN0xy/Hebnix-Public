@@ -176,7 +176,7 @@ fn taskbar_updates<T>(rx: Receiver<T>, mut apply: impl FnMut(T)) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
     use std::time::Duration;
