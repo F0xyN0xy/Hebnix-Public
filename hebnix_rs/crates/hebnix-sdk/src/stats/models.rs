@@ -72,6 +72,7 @@ pub struct PlayerState {
     pub car_touches: i64,
     pub demos: i64,
     pub loadout: Vec<String>,
+    // spectator-only
     pub has_car: bool,
     pub speed: f64,
     pub boost: i64,

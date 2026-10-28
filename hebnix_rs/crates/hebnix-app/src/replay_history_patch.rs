@@ -94,7 +94,8 @@ pub fn show_admin_restart_canceled() {
 }
 
 pub fn restart_as_admin(remove: bool) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
+    #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()
         .map_err(|e| e.to_string())?
         .to_string_lossy()
@@ -386,13 +387,17 @@ fn install_closed(game: &Path, base: &Path) -> Result<(), String> {
 }
 
 fn replace(from: &Path, to: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::fs::MetadataExt;
-    use windows::Win32::Storage::FileSystem::{
+    #[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+    #[cfg(target_os = "windows")]
+use std::os::windows::fs::MetadataExt;
+    #[cfg(target_os = "windows")]
+use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACE_FILE_FLAGS,
         ReplaceFileW,
     };
-    use windows::core::PCWSTR;
+    #[cfg(target_os = "windows")]
+use windows::core::PCWSTR;
     let from =
         std::fs::canonicalize(from).map_err(|e| format!("Cannot locate staged package: {e}"))?;
     let to =

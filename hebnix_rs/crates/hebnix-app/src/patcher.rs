@@ -5,6 +5,7 @@
 pub mod background_merger;
 pub mod anthem_patcher;
 pub mod backup_guard;
+pub mod game_path;
 pub mod ball;
 pub mod ball_visual;
 pub mod boost_patcher;

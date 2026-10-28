@@ -565,8 +565,10 @@ fn clear_asset_dir(plugin_dir: &std::path::Path, rel: &str) -> bool {
 }
 
 fn shell_open(target: &str) -> bool {
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    #[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::ShellExecuteW;
+    #[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
     let file: Vec<u16> = format!("{target}\0").encode_utf16().collect();
     let hinst = unsafe {

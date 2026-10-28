@@ -1,9 +1,27 @@
 //! keyboard, xinput (xbox) + generic dinput (ps4/ps5/8bitdo/etc, via gilrs) input detection.
 
 pub mod bindings;
+#[cfg(target_os = "windows")]
 pub mod dinput;
+#[cfg(target_os = "linux")]
+#[path = "dinput_linux.rs"]
+pub mod dinput;
+#[cfg(target_os = "windows")]
 pub mod game_actions;
+#[cfg(target_os = "linux")]
+#[path = "game_actions_linux.rs"]
+pub mod game_actions;
+#[cfg(target_os = "linux")]
+mod gilrs_hub;
+#[cfg(target_os = "windows")]
 pub mod keyboard;
+#[cfg(target_os = "linux")]
+#[path = "keyboard_linux.rs"]
+pub mod keyboard;
+#[cfg(target_os = "windows")]
+pub mod xinput;
+#[cfg(target_os = "linux")]
+#[path = "xinput_linux.rs"]
 pub mod xinput;
 
 pub use bindings::{

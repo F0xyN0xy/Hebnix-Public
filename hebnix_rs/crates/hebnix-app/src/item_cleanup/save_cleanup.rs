@@ -15,11 +15,15 @@ fn regular(path: &Path) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
+        #[cfg(target_os = "windows")]
+use std::os::windows::fs::MetadataExt;
         if meta.file_attributes() & 0x400 != 0 {
-            use std::os::windows::io::AsRawHandle;
-            use windows::Win32::Foundation::HANDLE;
-            use windows::Win32::Storage::FileSystem::{
+            #[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawHandle;
+            #[cfg(target_os = "windows")]
+use windows::Win32::Foundation::HANDLE;
+            #[cfg(target_os = "windows")]
+use windows::Win32::Storage::FileSystem::{
                 FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo, GetFileInformationByHandleEx,
             };
             // OneDrive Files On-Demand uses cloud reparse tags even for local
@@ -214,7 +218,8 @@ fn execute(
         options.read(true);
         #[cfg(windows)]
         {
-            use std::os::windows::fs::OpenOptionsExt;
+            #[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
             options.share_mode(1 | 4);
         }
         let _lock = options

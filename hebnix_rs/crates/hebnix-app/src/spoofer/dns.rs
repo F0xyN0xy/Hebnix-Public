@@ -46,7 +46,8 @@ fn resolve_uncached(host: &str) -> Result<(Ipv4Addr, u32), String> {
 }
 
 fn windows_dns(host: &str) -> Result<(Ipv4Addr, u32), String> {
-    use windows::Win32::NetworkManagement::Dns::*;
+    #[cfg(target_os = "windows")]
+use windows::Win32::NetworkManagement::Dns::*;
     let host: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
     let mut records = std::ptr::null_mut();
     let result = unsafe {

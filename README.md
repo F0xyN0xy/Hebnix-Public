@@ -38,6 +38,51 @@ Plugins can access WebSocket match history through `hebnix.rlapi.enabled` and `h
 
 `hebnix.log` and `crash.txt` are written beside the executable. Set `RUST_LOG=debug` for additional logging.
 
+## Platforms
+
+- **Windows** - Build from `hebnix_rs/` directory
+- **Linux** - Build from `hebnix_rs/` directory (supports Hyprland, Wayland compositors, X11)
+
+## Quick Start
+
+### Windows
+```batch
+build.bat
+# or
+cd hebnix_rs && cargo build --release
+```
+
+### Linux
+```bash
+cd hebnix_rs
+cargo build --release
+```
+
+### Build
+```bash
+./build.sh # Auto-detect platform
+./build.sh linux  # Force Linux
+./build.sh windows # Force Windows
+make linux # Using Makefile
+make windows # Using Makefile
+```
+
+## Repository Structure
+
+- `hebnix_rs/` - Windows version and shared codebase
+- `hebnix_linux/` - Linux port with Wayland/X11 support
+- `merge_hebnix.sh` / `merge_hebnix.py` - Scripts to sync changes from Windows to Linux
+- `.github/workflows/` - CI/CD for both platforms
+
+## Linux-Specific Features
+
+- Wayland support (wlr-layer-shell for overlays)
+- X11 support (i3, Cinnamon, XFCE, MATE)
+- evdev input handling
+- Linux path handling (case-sensitive filesystems)
+- Heroic/Steam Proton launcher integration
+- AppImage packaging
+
 ## License
 
 [LICENSE](LICENSE.md)

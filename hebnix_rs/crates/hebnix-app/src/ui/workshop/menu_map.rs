@@ -11,8 +11,12 @@ use std::path::{Path, PathBuf};
 /// The BakkesMod plugin that previews camera and car values live in game.
 const MENUCAM_URL: &str = "https://github.com/xplodingeggo/menucam";
 
-/// Where MenuCam saves its export, under %APPDATA%.
+/// Where MenuCam saves its export, under %APPDATA% on Windows or a Windows
+/// user's home inside the game's Wine prefix on Linux.
+#[cfg(target_os = "windows")]
 const MENUCAM_EXPORT: &str = "bakkesmod/bakkesmod/data/menucam/hebnix.json";
+#[cfg(target_os = "linux")]
+const MENUCAM_EXPORT: &str = "AppData/Roaming/bakkesmod/bakkesmod/data/menucam/hebnix.json";
 
 /// Width of the plugin card beside the settings.
 const PLUGIN_CARD_WIDTH: f32 = 260.0;
@@ -779,7 +783,22 @@ fn camera_purpose(tag: &str) -> Option<String> {
 }
 
 /// MenuCam's export in BakkesMod's data folder, if it has made one.
+#[cfg(target_os = "windows")]
 fn find_menucam_export() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("APPDATA")?).join(MENUCAM_EXPORT);
     path.is_file().then_some(path)
+}
+
+/// The newest MenuCam export in any Rocket League prefix.
+#[cfg(target_os = "linux")]
+fn find_menucam_export() -> Option<PathBuf> {
+    hebnix_sdk::process::wine_prefix::rocket_league_prefixes()
+        .iter()
+        .filter_map(|prefix| std::fs::read_dir(prefix.join("drive_c/users")).ok())
+        .flatten()
+        .flatten()
+        .map(|user| user.path().join(MENUCAM_EXPORT))
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
 }

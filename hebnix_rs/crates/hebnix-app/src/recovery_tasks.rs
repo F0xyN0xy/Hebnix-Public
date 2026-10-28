@@ -6,7 +6,8 @@ pub fn session_marker(base_dir: &Path) -> PathBuf {
 }
 
 pub fn uninstall_legacy() -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
+    #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
     let user = format!(
         "{}-{}",
         std::env::var("USERDOMAIN").map_err(|e| e.to_string())?,

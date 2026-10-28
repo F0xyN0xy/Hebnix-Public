@@ -1,12 +1,19 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+#[cfg(target_os = "windows")]
 mod auto_upload_replays;
+#[cfg(target_os = "windows")]
 mod replay_metadata;
+#[cfg(target_os = "windows")]
 mod replay_scan;
+#[cfg(target_os = "windows")]
 mod replay_timeline;
+#[cfg(target_os = "windows")]
 mod replay_source;
+#[cfg(target_os = "windows")]
 mod replay_history_log;
+#[cfg(target_os = "windows")]
 mod replay_history_patch;
 mod patcher;
 mod ball {
@@ -15,34 +22,64 @@ mod ball {
 mod boost_patcher {
     pub use crate::patcher::boost_patcher::*;
 }
+#[cfg(target_os = "windows")]
 mod car_patcher {
     pub use crate::patcher::car_patcher::*;
 }
+#[cfg(target_os = "linux")]
+mod colours {
+    pub use crate::patcher::colours::*;
+}
 mod config;
+#[cfg(target_os = "windows")]
 mod cosmetic_thumbnail {
     pub use crate::patcher::cosmetic_thumbnail::*;
 }
+#[cfg(target_os = "windows")]
 mod cosmetic_upk {
     pub use crate::patcher::cosmetic_upk::*;
 }
+#[cfg(target_os = "windows")]
 mod decal_patcher {
     pub use crate::patcher::decal_patcher::*;
 }
 mod deep_link;
 mod discord_link;
 mod discord_presence;
+#[cfg(target_os = "windows")]
 mod dpi_fix;
+#[cfg(target_os = "linux")]
+#[path = "dpi_fix_linux.rs"]
+mod dpi_fix;
+#[cfg(target_os = "windows")]
 mod epic_connection;
+#[cfg(target_os = "windows")]
 mod hotkey;
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
+mod hotkey;
+#[cfg(target_os = "windows")]
 mod hosts_file;
 mod i18n;
 mod item_cleanup;
 mod messages;
+#[cfg(target_os = "windows")]
 mod monitor;
+#[cfg(target_os = "linux")]
+#[path = "monitor_linux.rs"]
+mod monitor;
+#[cfg(target_os = "windows")]
 mod multiplayer_assets;
+#[cfg(target_os = "windows")]
 #[path = "multiplayer-lan/mod.rs"]
 mod multiplayer_lan;
+#[cfg(target_os = "linux")]
+mod multiplayer_lan;
 mod notifications;
+#[cfg(target_os = "windows")]
+mod overlay;
+#[cfg(target_os = "linux")]
+#[path = "overlay/mod_linux.rs"]
 mod overlay;
 mod owned_inventory;
 mod veryimportantfile;
@@ -51,10 +88,19 @@ mod patch_core {
 }
 mod plugins;
 mod presets;
+#[cfg(target_os = "windows")]
+mod rl_launch;
+#[cfg(target_os = "linux")]
+#[path = "rl_launch_linux.rs"]
 mod rl_launch;
 mod recovery_tasks;
+#[cfg(target_os = "windows")]
 mod runtime_assets;
 mod screen;
+#[cfg(target_os = "windows")]
+mod spoofer;
+#[cfg(target_os = "linux")]
+#[path = "spoofer/mod_linux.rs"]
 mod spoofer;
 mod statsapi_ini;
 mod speed_patch {
@@ -67,14 +113,27 @@ mod theme;
 mod toast;
 mod tray;
 mod ui;
+#[cfg(target_os = "windows")]
 mod ui_work;
 mod update;
 mod upk_keys {
     pub use crate::patcher::upk_keys::*;
 }
+#[cfg(target_os = "windows")]
 mod watchdog;
+#[cfg(target_os = "linux")]
+#[path = "watchdog_linux.rs"]
+mod watchdog;
+#[cfg(target_os = "windows")]
+mod webview;
+#[cfg(target_os = "linux")]
+#[path = "webview_linux.rs"]
 mod webview;
 mod winutil;
+#[cfg(target_os = "windows")]
+mod window_state;
+#[cfg(target_os = "linux")]
+#[path = "window_state_linux.rs"]
 mod window_state;
 mod visibility;
 
@@ -122,7 +181,6 @@ fn setup_logging(base_dir: &std::path::Path) {
         .unwrap_or_else(|_| "info,wgpu_core=warn,wgpu_hal=warn,naga=warn".into());
 
     // sync writer, nothing buffered so the log survives a hard crash.
-    // volume's low enough that sync writes don't matter.
     let log_file = open_fresh_log(base_dir).map_err(|error| {
         eprintln!("failed to refresh hebnix.log: {error}");
     });
@@ -142,8 +200,6 @@ fn setup_logging(base_dir: &std::path::Path) {
     }
 }
 
-/// On panic dump msg + backtrace to AppData's crash.txt, also log it,
-/// then fall through to the default hook.
 fn setup_panic_hook(base_dir: &std::path::Path) {
     let crash_path = base_dir.join("crash.txt");
     let default_hook = std::panic::take_hook();
@@ -171,8 +227,7 @@ fn setup_panic_hook(base_dir: &std::path::Path) {
     }));
 }
 
-/// dwm always composites a dcomp visual, an hwnd swapchain only sometimes.
-/// pairs with WS_EX_NOREDIRECTIONBITMAP in the patched egui-winit.
+#[cfg(target_os = "windows")]
 fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::wgpu;
 
@@ -180,9 +235,6 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
         let desc = &mut setup.instance_descriptor;
         desc.backends = wgpu::Backends::DX12;
-        // `Auto` may pick up an unrelated dxcompiler.dll from PATH without the
-        // matching dxil.dll, making wgpu's first internal shader fail and lose
-        // the device. FXC is provided by Windows and needs no bundled DLLs.
         desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
         desc.backend_options.dx12.presentation_system = if window_state::safe_rendering() {
             wgpu::Dx12SwapchainKind::DxgiFromHwnd
@@ -193,6 +245,83 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     options
 }
 
+#[cfg(target_os = "linux")]
+fn main() -> eframe::Result {
+    unsafe {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()) {
+            std::env::set_var("GDK_BACKEND", "wayland");
+        }
+    }
+
+    if let Some(code) = spoofer::maybe_handle_privileged_cli() {
+        std::process::exit(code);
+    }
+
+    let base_dir = config::base_dir();
+    if let Some(parent_pid) = watchdog::parent_pid() {
+        watchdog::run(parent_pid);
+        return Ok(());
+    }
+    setup_logging(&base_dir);
+    deep_link::register_and_queue_from_args(&base_dir);
+    setup_panic_hook(&base_dir);
+    tracing::info!("Hebnix {} starting", app::APP_VERSION);
+    multiplayer_lan::raise_net_admin_ambient();
+
+    let cfg = config::Config::load(&base_dir);
+    i18n::init(&cfg.settings.language, Some(base_dir.join("locales")));
+
+    let Some(_lock) = winutil::acquire_single_instance() else {
+        winutil::focus_existing_instance();
+        return Ok(());
+    };
+
+    spoofer::restore_if_crashed(&base_dir);
+    if let Err(error) = spoofer::cleanup_websocket_once(&base_dir) {
+        tracing::warn!("WebSocket proxy cleanup: {error}");
+    }
+    let _ = watchdog::spawn();
+
+    hebnix_sdk::process::exempt_own_window_decorations();
+
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Hebnix")
+        .with_inner_size([
+            (cfg.window.width as f32).max(app::MIN_WIDTH),
+            (cfg.window.height as f32).max(app::MIN_HEIGHT),
+        ])
+        .with_min_inner_size([app::MIN_WIDTH, app::MIN_HEIGHT])
+        .with_transparent(true)
+        .with_decorations(false)
+        .with_visible(!cfg.settings.start_in_tray);
+    #[cfg(target_os = "linux")]
+    if let (Some(x), Some(y)) = (cfg.window.x, cfg.window.y) {
+        viewport = viewport.with_position([x as f32, y as f32]);
+    }
+    if let Some(icon) = load_window_icon(&base_dir) {
+        viewport = viewport.with_icon(icon);
+    }
+
+    let options = eframe::NativeOptions {
+        viewport,
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = eframe::run_native(
+        "Hebnix",
+        options,
+        Box::new(|cc| Ok(Box::new(HebnixApp::new(cc)))),
+    );
+    watchdog::finish_live_handoff();
+    result
+}
+
+#[cfg(target_os = "windows")]
 fn main() -> eframe::Result {
     let base_dir = config::base_dir();
     if let Some(parent_pid) = watchdog::parent_pid() {
@@ -223,8 +352,6 @@ fn main() -> eframe::Result {
     i18n::init(&cfg.settings.language, Some(base_dir.join("locales")));
     tracing::info!("startup localization initialized");
 
-    // relaunch elevated if the user asked for it. --no-elevate comes back when
-    // uac was declined
     let skip_elevate = std::env::args().any(|a| a == spoofer::SKIP_ELEVATE_ARG);
     if skip_elevate && !spoofer::is_admin() {
         cfg.settings.run_as_admin = false;
@@ -239,7 +366,6 @@ fn main() -> eframe::Result {
         tracing::warn!("couldnt spawn the elevated relaunch helper");
     }
 
-    // single instance guard
     let Some(_mutex) = winutil::acquire_single_instance() else {
         winutil::focus_existing_instance();
         return Ok(());

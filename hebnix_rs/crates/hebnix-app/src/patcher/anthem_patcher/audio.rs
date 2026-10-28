@@ -277,7 +277,8 @@ pub(super) fn original_audio(base: &Path, path: &Path) -> Result<Audio, String> 
     command.args(["-i", "-o"]).arg(&output).arg(path);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
     let result = (|| {

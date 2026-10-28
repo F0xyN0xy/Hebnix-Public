@@ -136,6 +136,20 @@ fn check_stats_port() -> bool {
 
 // Main entry point
 
+/// On Linux, Launch.log lives under the emulated "My Documents" of the
+/// Wine/Proton prefix Rocket League runs in, never the host's ~/Documents.
+#[cfg(target_os = "linux")]
+fn find_launch_log() -> PathBuf {
+    let rel = Path::new("My Games/Rocket League/TAGame/Logs/Launch.log");
+    let docs = crate::process::find_rocket_league()
+        .and_then(|game| crate::process::documents_dir_for_exe(&game.exe_path))
+        .or_else(crate::process::rocket_league_documents_dir)
+        .or_else(dirs::document_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    docs.join(rel)
+}
+
+#[cfg(target_os = "windows")]
 fn find_launch_log() -> PathBuf {
     dirs::document_dir()
         .unwrap_or_else(|| PathBuf::from("."))

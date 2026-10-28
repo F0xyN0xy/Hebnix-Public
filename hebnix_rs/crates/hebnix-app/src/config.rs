@@ -15,6 +15,10 @@ pub const DEFAULT_STATSAPI_PATH: &str =
 pub struct WindowCfg {
     pub width: u32,
     pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<i32>,
 }
 
 impl Default for WindowCfg {
@@ -22,6 +26,8 @@ impl Default for WindowCfg {
         Self {
             width: 1250,
             height: 700,
+            x: None,
+            y: None,
         }
     }
 }

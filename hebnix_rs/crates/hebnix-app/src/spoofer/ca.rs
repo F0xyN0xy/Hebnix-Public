@@ -246,7 +246,8 @@ pub fn uninstall() -> Result<(), String> {
 }
 
 fn certutil(args: &[&str]) -> Result<String, String> {
-    use std::os::windows::process::CommandExt;
+    #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
     let out = Command::new("certutil")
         .args(args)

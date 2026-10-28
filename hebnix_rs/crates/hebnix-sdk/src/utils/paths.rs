@@ -5,6 +5,11 @@ use std::path::PathBuf;
 /// Windows' Documents known folder includes OneDrive and other folder redirects.
 /// Use the traditional location only when the known folder is unavailable.
 pub fn documents_dir() -> Option<PathBuf> {
+    // on Linux, the emulated "My Documents" inside the game's Wine/Proton prefix
+    #[cfg(target_os = "linux")]
+    if let Some(dir) = crate::process::rocket_league_documents_dir() {
+        return Some(dir);
+    }
     dirs::document_dir()
         .filter(|path| path.is_absolute())
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
@@ -15,13 +20,28 @@ pub fn documents_dir() -> Option<PathBuf> {
 ///
 /// On Windows this is `%AppData%\Hebnix`. `HEBNIX_BASE_DIR` remains available
 /// for isolated development and test runs.
+#[cfg(target_os = "windows")]
+const BASE_DIR_NAME: &str = "Hebnix";
+#[cfg(target_os = "linux")]
+const BASE_DIR_NAME: &str = "hebnix";
+
+/// `%AppData%\Hebnix` on Windows, `~/.config/hebnix` (XDG) on Linux. Must
+/// resolve to the same directory as the app crate's `config::base_dir()`.
+fn default_base_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let root = dirs::data_dir();
+    #[cfg(target_os = "linux")]
+    let root = dirs::config_dir();
+    root.map(|dir| dir.join(BASE_DIR_NAME))
+}
+
 pub fn base_dir() -> PathBuf {
     let dir = std::env::var_os("HEBNIX_BASE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(portable_base_dir)
-        .or_else(|| dirs::data_dir().map(|dir| dir.join("Hebnix")))
-        .unwrap_or_else(|| std::env::temp_dir().join("Hebnix"));
+        .or_else(default_base_dir)
+        .unwrap_or_else(|| std::env::temp_dir().join(BASE_DIR_NAME));
 
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!(
