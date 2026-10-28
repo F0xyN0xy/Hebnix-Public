@@ -42,6 +42,9 @@ struct Anthem {
     regions: Vec<Region>,
     error: Option<String>,
 }
+fn default_volume() -> f32 {
+    1.0
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct SavedPatch {
     name: String,
@@ -49,6 +52,8 @@ struct SavedPatch {
     internal: String,
     source: String,
     starts: BTreeMap<String, f64>,
+    #[serde(default = "default_volume")]
+    volume: f32,
 }
 type Saved = BTreeMap<String, SavedPatch>;
 #[derive(Clone)]
@@ -58,6 +63,7 @@ struct Editor {
     source_name: String,
     start: f64,
     cursor: f64,
+    volume: f32,
 }
 impl Editor {
     fn longest_region(&self) -> Option<&Region> {
@@ -352,7 +358,10 @@ fn apply(
             let Some(&start) = patch.starts.get(&region.label) else {
                 continue;
             };
-            let wav = source.section(start, region.clip.duration)?.wem();
+            let wav = source
+                .section(start, region.clip.duration)?
+                .with_volume(patch.volume)
+                .wem();
             banks
                 .entry(region.bank.clone())
                 .or_default()
@@ -524,7 +533,7 @@ impl AnthemPatcherState {
             }
             Ok(JobResult::Preview(audio)) => {
                 self.player_imported = false;
-                match Player::play(&audio, 0.0, audio.duration()) {
+                match Player::play(&audio, 0.0, audio.duration(), 1.0) {
                     Ok(p) => self.player = Some(p),
                     Err(e) => self.error = Some(e),
                 }
@@ -704,6 +713,7 @@ impl AnthemPatcherState {
         self.status.clear();
         let saved = self.saved.get(&anthem.key);
         let source = saved.map(|s| s.source.clone());
+        let volume = saved.map_or(1.0, |s| s.volume.clamp(0.0, 1.0));
         self.editor = Some(Editor {
             start: saved
                 .and_then(|s| {
@@ -720,6 +730,7 @@ impl AnthemPatcherState {
             audio: None,
             source_name: source.clone().unwrap_or_default(),
             cursor: 0.0,
+            volume,
         });
         if let Some(source) = source {
             self.job(ctx, "Loading saved anthem audio…", move || {
@@ -966,7 +977,39 @@ impl AnthemPatcherState {
                 {
                     editor.cursor = player.position();
                 }
-                let seeked = timeline(ui, &audio, &mut start, length, &mut editor.cursor);
+                ui.horizontal(|ui| {
+                    ui.label("Song volume");
+                    let mut percent = editor.volume * 100.0;
+                    if ui
+                        .add(egui::Slider::new(&mut percent, 0.0..=100.0).suffix("%"))
+                        .changed()
+                    {
+                        editor.volume = percent / 100.0;
+                        if self.player_imported
+                            && let Some(player) = &self.player
+                        {
+                            let at = player.position().clamp(start, start + length - 0.001);
+                            let paused = player.paused();
+                            match Player::play(&audio, at, start + length, editor.volume) {
+                                Ok(mut p) => {
+                                    if paused {
+                                        p.toggle();
+                                    }
+                                    self.player = Some(p);
+                                }
+                                Err(e) => self.error = Some(e),
+                            }
+                        }
+                    }
+                });
+                let seeked = timeline(
+                    ui,
+                    &audio,
+                    &mut start,
+                    length,
+                    &mut editor.cursor,
+                    editor.volume,
+                );
                 start = start.min(audio.max_start(length).unwrap());
                 editor.start = start;
                 if old_start != start {
@@ -979,6 +1022,7 @@ impl AnthemPatcherState {
                         &audio,
                         editor.cursor.clamp(start, start + length - 0.001),
                         start + length,
+                        editor.volume,
                     ) {
                         Ok(mut p) => {
                             if paused {
@@ -1023,7 +1067,7 @@ impl AnthemPatcherState {
                             } else {
                                 start
                             };
-                            match Player::play(&audio, cursor, start + length) {
+                            match Player::play(&audio, cursor, start + length, editor.volume) {
                                 Ok(p) => {
                                     self.player = Some(p);
                                     self.player_imported = true;
@@ -1079,6 +1123,7 @@ impl AnthemPatcherState {
                     internal: editor.anthem.internal.clone(),
                     source: String::new(),
                     starts,
+                    volume: editor.volume.clamp(0.0, 1.0),
                 };
                 self.player = None;
                 self.job(&ctx, "Saving and patching anthem audio…", move || {
@@ -1131,6 +1176,7 @@ fn timeline(
     start: &mut f64,
     length: f64,
     cursor: &mut f64,
+    volume: f32,
 ) -> bool {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 150.0),
@@ -1151,7 +1197,7 @@ fn timeline(
     );
     for (i, peak) in audio.peaks.iter().enumerate() {
         let px = rect.left() + i as f32 / audio.peaks.len() as f32 * rect.width();
-        let h = peak * (rect.height() - 36.0) * 0.5;
+        let h = peak * volume.clamp(0.0, 1.0) * (rect.height() - 36.0) * 0.5;
         painter.line_segment(
             [
                 egui::pos2(px, rect.center().y - h),

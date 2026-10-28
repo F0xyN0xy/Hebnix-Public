@@ -96,6 +96,18 @@ impl Audio {
             self.rate,
         ))
     }
+    pub fn with_volume(&self, volume: f32) -> Self {
+        let gain = volume.clamp(0.0, 1.0);
+        if (gain - 1.0).abs() <= f32::EPSILON {
+            return self.clone();
+        }
+        let samples = self
+            .samples
+            .iter()
+            .map(|sample| (*sample as f32 * gain).round() as i16)
+            .collect();
+        Self::new(samples, self.channels, self.rate)
+    }
     pub fn wav(&self) -> Vec<u8> {
         let size = self.samples.len() as u32 * 2;
         let mut b = Vec::with_capacity(size as usize + 44);
@@ -189,11 +201,12 @@ pub(super) struct Player {
     paused_at: Option<f64>,
 }
 impl Player {
-    pub fn play(audio: &Audio, start: f64, end: f64) -> Result<Self, String> {
+    pub fn play(audio: &Audio, start: f64, end: f64, volume: f32) -> Result<Self, String> {
         let clip = audio.section(start, end - start)?;
         let (stream, handle) =
             OutputStream::try_default().map_err(|e| format!("Audio output: {e}"))?;
         let sink = Sink::try_new(&handle).map_err(|e| e.to_string())?;
+        sink.set_volume(volume.clamp(0.0, 1.0));
         sink.append(SamplesBuffer::new(
             clip.channels,
             clip.rate,
