@@ -35,6 +35,26 @@ fn audio_selection_preserves_stereo_frames_and_exact_sample_count() {
 }
 
 #[test]
+fn volume_scales_samples_and_legacy_patches_default_to_full() {
+    let audio = Audio::new(vec![1000, -1000, 20000, -20000], 1, 1000);
+    let quiet = audio.with_volume(0.25);
+    assert_eq!(quiet.samples.as_slice(), &[250, -250, 5000, -5000]);
+    assert_eq!(
+        audio.with_volume(1.0).samples.as_slice(),
+        audio.samples.as_slice()
+    );
+    assert_eq!(
+        audio.with_volume(2.0).samples.as_slice(),
+        audio.samples.as_slice()
+    );
+    let legacy: SavedPatch = serde_json::from_str(
+        r#"{"name":"A","upk":"a.upk","internal":"a","source":"a.wav","starts":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.volume, 1.0);
+}
+
+#[test]
 fn selection_at_song_end_uses_whole_frames_without_overrunning() {
     let audio = Audio::new(vec![1000; 2000], 2, 1000);
     // Rounding both a 333.5-frame clip and its complementary start used to
@@ -162,6 +182,7 @@ fn installed_anthems_scan_patch_decode_and_restore() {
         internal: breathe.internal.clone(),
         source: breathe_source.to_string_lossy().into_owned(),
         starts: BTreeMap::from([("Goal".into(), goal_start)]),
+        volume: 0.5,
     };
     let breathe_saved = BTreeMap::from([(breathe.key.clone(), breathe_patch)]);
     apply(
@@ -187,7 +208,7 @@ fn installed_anthems_scan_patch_decode_and_restore() {
                     .unwrap()
                     .samples
                     .iter()
-                    .all(|s| *s == 5000)
+                    .all(|s| *s == 2500)
             );
         }
     }
@@ -258,6 +279,7 @@ fn installed_anthems_scan_patch_decode_and_restore() {
         internal: sample.internal.clone(),
         source: path.to_string_lossy().into_owned(),
         starts,
+        volume: 1.0,
     };
     let saved = BTreeMap::from([(sample.key.clone(), patch)]);
     let active = HashMap::from([(sample.key.clone(), sample.name.clone())]);
@@ -381,6 +403,7 @@ fn installed_anthems_scan_patch_decode_and_restore() {
                 internal: a.internal.clone(),
                 source: shared_source.to_string_lossy().into_owned(),
                 starts: a.regions.iter().map(|r| (r.label.clone(), 0.0)).collect(),
+                volume: 1.0,
             },
         );
         active.insert(a.key.clone(), a.name.clone());
@@ -541,7 +564,7 @@ fn timeline_handles_keep_duration_and_scrubber_seeks() {
                     ui.available_rect_before_wrap().min,
                     egui::vec2(ui.available_width(), 150.0),
                 );
-                timeline(ui, &audio, &mut start, length, &mut cursor);
+                timeline(ui, &audio, &mut start, length, &mut cursor, 1.0);
             },
         );
         (start, cursor, rect)

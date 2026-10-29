@@ -244,6 +244,7 @@ about-built-with-help-from-the-community = Built with help from the community
     xplodingeggo
     rlyvision
     FoxyNoxy
+    noxygalaxy
 statsapi-notice-set-20 = Set 20
 web-port-notice-set-49124 = Set 49124
 web-port-notice-dismiss = Dismiss
