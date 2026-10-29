@@ -260,6 +260,40 @@ impl RankSpoofState {
     }
 }
 
+/// a horizontally-centered row of label/hyperlink pieces (piece.1 is a URL
+/// for a hyperlink, None for a plain label) with a space between each.
+/// ui.horizontal() reserves the full available width, so wrapping it in
+/// vertical_centered never centers it; measure the real width and pad instead.
+fn credits_row(ui: &mut egui::Ui, pieces: &[(&str, Option<&str>)]) {
+    let spacing = 4.0;
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let total_width: f32 = pieces
+        .iter()
+        .map(|(text, _)| {
+            ui.painter()
+                .layout_no_wrap(text.to_string(), font_id.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+        .sum::<f32>()
+        + spacing * (pieces.len().saturating_sub(1)) as f32;
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = spacing;
+        ui.add_space(((ui.available_width() - total_width) / 2.0).max(0.0));
+        for (text, url) in pieces {
+            match url {
+                Some(url) => {
+                    ui.hyperlink_to(*text, *url);
+                }
+                None => {
+                    ui.label(*text);
+                }
+            }
+        }
+    });
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct FriendSpoofState {
     enabled: bool,
@@ -5109,8 +5143,32 @@ impl HebnixApp {
                     ),
                 ],
             ));
-            ui.separator();
-            ui.label(t("about-built-with-help-from-the-community"));
+            ui.hyperlink_to("hebnix.com", "https://hebnix.com");
+            ui.add_space(12.0);
+            credits_row(ui, &[
+                ("Built by", None),
+                ("Hebbins", Some("https://github.com/Hebbins")),
+                ("&", None),
+                ("nixvio64", Some("https://github.com/nixvio64")),
+            ]);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Contributors to Hebnix for Linux:").weak());
+            credits_row(ui, &[
+                ("xplodingeggo", Some("https://github.com/xplodingeggo")),
+                ("·", None),
+                ("rlyvision", Some("https://github.com/rlyvision")),
+                ("·", None),
+                ("noxygalaxy", Some("https://github.com/noxygalaxy")),
+            ]);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Contributors to Hebnix for Windows:").weak());
+            credits_row(ui, &[
+                ("xplodingeggo", Some("https://github.com/xplodingeggo")),
+                ("·", None),
+                ("rlyvision", Some("https://github.com/rlyvision")),
+                ("·", None),
+                ("FoxyNoxy", Some("https://github.com/F0xyN0xy")),
+            ]);
         });
     }
 
